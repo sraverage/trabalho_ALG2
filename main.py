@@ -100,11 +100,9 @@ def _resolve_time_limit(mode: str, n_vertices: int, custom_limit: float | None) 
         return custom_limit
     if mode == "full":
         return 1800.0
-    if n_vertices <= 18:
-        return 6.0
-    if n_vertices <= 20:
-        return 5.0
-    return 0.6
+    if n_vertices <= 29:
+        return 4.5
+    return 0.8
 
 
 def run_pipeline(

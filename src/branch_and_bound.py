@@ -8,6 +8,10 @@ import numpy as np
 from scipy.sparse.csgraph import minimum_spanning_tree
 
 
+HK_SCALE = 256
+HK_TWO_SCALE = 512
+
+
 class BnBResult(TypedDict):
     optimal_cost: int | None
     best_ub_found_so_far: int
@@ -33,7 +37,7 @@ def _reduce_prim_edges(
     """Executa os passos gulosos de Prim sobre listas de distâncias já inicializadas."""
     total = 0
     for _ in range(len(nodes)):
-        best_val = 10**12
+        best_val = 10**15
         best_idx = 0
         for idx, val in enumerate(min_e):
             if val < best_val:
@@ -141,6 +145,77 @@ def _segments_strictly_intersect(
     return ccw_abc != ccw_abd
 
 
+def _compute_hk_potentials(dist: np.ndarray, root: int, iters: int = 180) -> np.ndarray:
+    """Calcula multiplicadores lagrangianos de Held-Karp em ponto fixo (escala HK_SCALE).
+
+    Executa ascensão por subgradiente sobre 1-árvores enraizadas em `root` com passo
+    do tipo Polyak amortecido e centrado (soma zero). Os potenciais inteiros escalonados
+    preservam estritamente a admissibilidade de qualquer relaxação sobre subconjuntos
+    de vértices sem arredondamento otimista.
+    """
+    n = dist.shape[0]
+    pi = np.zeros(n, dtype=np.float64)
+    if n < 4:
+        return np.zeros(n, dtype=np.int64)
+
+    d_float = dist.astype(np.float64)
+    others = [v for v in range(n) if v != root]
+    others_arr = np.asarray(others, dtype=np.int64)
+    best_lb = -1e18
+    best_pi = pi.copy()
+    step = 2.0
+
+    for it in range(iters):
+        mod_d = d_float + pi[:, None] + pi[None, :]
+        np.fill_diagonal(mod_d, 1e15)
+        sub = mod_d[np.ix_(others_arr, others_arr)]
+        k = n - 1
+        in_mst = np.zeros(k, dtype=bool)
+        in_mst[0] = True
+        min_e = sub[0].copy()
+        parent = np.zeros(k, dtype=np.int64)
+        deg = np.zeros(n, dtype=np.int64)
+        mst_w = 0.0
+
+        for _ in range(k - 1):
+            masked = np.where(in_mst, 1e15, min_e)
+            u = int(np.argmin(masked))
+            in_mst[u] = True
+            mst_w += float(min_e[u])
+            p = int(parent[u])
+            deg[others[u]] += 1
+            deg[others[p]] += 1
+            better = sub[u] < min_e
+            min_e = np.where(better, sub[u], min_e)
+            parent = np.where(better, u, parent)
+
+        row_r = mod_d[root, others_arr]
+        idx2 = np.argsort(row_r)[:2]
+        e1, e2 = int(idx2[0]), int(idx2[1])
+        deg[root] = 2
+        deg[others[e1]] += 1
+        deg[others[e2]] += 1
+
+        lb = mst_w + float(row_r[e1] + row_r[e2]) - 2.0 * float(np.sum(pi))
+        if lb > best_lb:
+            best_lb = lb
+            best_pi = pi.copy()
+
+        subgrad = deg - 2
+        norm_sq = int(np.sum(subgrad * subgrad))
+        if norm_sq == 0:
+            break
+
+        gap = max(best_lb * 0.12 * (0.90 ** (it // 5)), 0.5) + (best_lb - lb)
+        alpha = step * gap / norm_sq
+        pi = pi + alpha * subgrad
+        pi -= np.mean(pi)
+        if (it + 1) % 20 == 0:
+            step *= 0.75
+
+    return np.round(best_pi * HK_SCALE).astype(np.int64)
+
+
 class BranchAndBoundTSP:
     """Algoritmo Exato Branch-and-Bound via DFS In-Place com Bitmask e Funil de Poda."""
 
@@ -159,8 +234,6 @@ class BranchAndBoundTSP:
         self.use_geom_pruning = bool(use_geom_pruning)
         self.mst_mode = mst_mode
 
-        self.sorted_neighbors = np.argsort(self.dist, axis=1).astype(np.int64)
-        self.neighbors_list: list[list[int]] = self.sorted_neighbors.tolist()
         self.dist_list: list[list[int]] = self.dist.tolist()
         sorted_dists = np.sort(self.dist, axis=1)
         self.min1 = sorted_dists[:, 1].astype(np.int64)
@@ -168,6 +241,29 @@ class BranchAndBoundTSP:
         self.two_min_sum = (sorted_dists[:, 1] + sorted_dists[:, 2]).astype(np.int64)
         self.two_min_list: list[int] = self.two_min_sum.tolist()
         self.root_vertex: int = int(np.argmax(self.two_min_sum))
+
+        self.pi_int: np.ndarray = _compute_hk_potentials(self.dist, self.root_vertex)
+        self.pi_list: list[int] = self.pi_int.tolist()
+
+        mod_dist = (self.dist * HK_SCALE + self.pi_int[:, None] + self.pi_int[None, :]).astype(
+            np.int64
+        )
+        np.fill_diagonal(mod_dist, 10**15)
+        self.mod_list: list[list[int]] = mod_dist.tolist()
+
+        mod_sorted = np.sort(mod_dist, axis=1)
+        self.mod_two_adj: list[int] = [
+            int(mod_sorted[u, 0] + mod_sorted[u, 1] - 4 * self.pi_int[u])
+            for u in range(self.n)
+        ]
+        self.mod_end_adj: list[int] = [
+            int(mod_sorted[u, 0] - 2 * self.pi_int[u]) for u in range(self.n)
+        ]
+
+        reduced_cost = mod_dist - (mod_sorted[:, 0][None, :] // 2)
+        np.fill_diagonal(reduced_cost, 10**15)
+        self.sorted_neighbors = np.argsort(reduced_cost, axis=1).astype(np.int64)
+        self.neighbors_list: list[list[int]] = self.sorted_neighbors.tolist()
 
         self.best_cost: int = 0
         self.best_tour: list[int] = []
@@ -198,12 +294,12 @@ class BranchAndBoundTSP:
         cy = float(self.coords[curr, 1])
         dx = float(self.coords[nxt, 0])
         dy = float(self.coords[nxt, 1])
-        d_cd = int(self.dist[curr, nxt])
+        d_cd = self.dist_list[curr][nxt]
 
         for i in range(count - 2):
             u = self.path[i]
             v = self.path[i + 1]
-            if int(self.dist[u, v]) + d_cd <= int(self.dist[u, curr]) + int(self.dist[v, nxt]):
+            if self.dist_list[u][v] + d_cd <= self.dist_list[u][curr] + self.dist_list[v][nxt]:
                 continue
             ax = float(self.coords[u, 0])
             ay = float(self.coords[u, 1])
@@ -218,19 +314,20 @@ class BranchAndBoundTSP:
         curr: int,
         curr_cost: int,
         visited_mask: int,
+        rem_pi_sum: int,
     ) -> int:
-        """Calcula o máximo entre o 1-Tree clássico em U e o 1-Tree de Held-Karp no pivô outlier r.
+        """Calcula a relaxação lagrangiana de 1-Árvore com potenciais de Held-Karp sobre U.
 
-        Quando um vértice isolado r (como Gibraltar em ulysses16) permanece em U, uma MST
-        simples sobre U conecta r como folha de grau 1, subestimando o custo real em uma
-        aresta longa inteira. Ao escolher r = argmax_{u in U} two_min_sum[u] como raiz da
-        1-árvore (contraindo {0, curr} como supernó da árvore geradora sobre U \\ {r} e
-        somando as duas menores arestas incidentes a r em (U \\ {r}) U {0, curr}), obtém-se
-        um limite inferior estritamente admissível e imune a folhas outliers.
+        Para o caminho parcial de `root` até `curr`, qualquer completamento hamiltoniano
+        sobre os não-visitados U forma uma árvore geradora em U acrescida de duas conexões
+        aos extremos `root` e `curr`. Somando as arestas penalizadas (d_ij * M + pi_i + pi_j)
+        e subtraindo os potenciais acumulados (pi[root] + pi[curr] + 2 * sum_{u in U} pi[u]),
+        obtém-se um limite inferior inteiro estritamente admissível via teto exato.
         """
         t0 = time.perf_counter()
         root = self.root_vertex
         unvisited = [u for u in range(self.n) if not (visited_mask & (1 << u))]
+
         if self.mst_mode == "scipy_csgraph":
             idx_arr = np.asarray(unvisited, dtype=np.int64)
             sub_mat = self.dist[np.ix_(idx_arr, idx_arr)]
@@ -240,43 +337,23 @@ class BranchAndBoundTSP:
             self.bb_mst_bound_time += time.perf_counter() - t0
             return curr_cost + mst_w + min_0 + min_curr
 
-        dist_list = self.dist_list
-        d_root = dist_list[root]
-        dc = dist_list[curr]
+        mod_list = self.mod_list
+        pi_list = self.pi_list
+        mr = mod_list[root]
+        mc = mod_list[curr]
         k = len(unvisited)
 
         u0 = unvisited[0]
-        row0 = dist_list[u0]
+        row0 = mod_list[u0]
         min_e = [row0[unvisited[j]] for j in range(1, k)]
-        mst_w = _reduce_prim_edges(min_e, unvisited[1:], dist_list)
+        mst_w = _reduce_prim_edges(min_e, unvisited[1:], mod_list)
 
-        min_0 = min(d_root[u] for u in unvisited)
-        min_curr = min(dc[u] for u in unvisited)
-        lb_classic = curr_cost + mst_w + min_0 + min_curr
-        if lb_classic >= self.best_cost:
-            self.bb_mst_bound_time += time.perf_counter() - t0
-            return lb_classic
+        min_r = min(mr[u] for u in unvisited)
+        min_c = min(mc[u] for u in unvisited)
+        scaled_rem = mst_w + min_r + min_c - pi_list[root] - pi_list[curr] - 2 * rem_pi_sum
 
-        two_min_l = self.two_min_list
-        r = max(unvisited, key=lambda u: two_min_l[u])
-        rem = [u for u in unvisited if u != r]
-        min_e2 = [d_root[u] if d_root[u] < dc[u] else dc[u] for u in rem]
-        mst_w2 = _reduce_prim_edges(min_e2, rem[:], dist_list)
-
-        dr = dist_list[r]
-        m1 = d_root[r] if d_root[r] < dc[r] else dc[r]
-        m2 = dc[r] if d_root[r] < dc[r] else d_root[r]
-        for u in rem:
-            d = dr[u]
-            if d < m1:
-                m2 = m1
-                m1 = d
-            elif d < m2:
-                m2 = d
-
-        lb_held_karp = curr_cost + mst_w2 + m1 + m2
         self.bb_mst_bound_time += time.perf_counter() - t0
-        return lb_classic if lb_classic >= lb_held_karp else lb_held_karp
+        return curr_cost + (scaled_rem + HK_SCALE - 1) // HK_SCALE
 
     def _dfs(
         self,
@@ -285,6 +362,8 @@ class BranchAndBoundTSP:
         curr_cost: int,
         visited_mask: int,
         rem_two_min: int,
+        rem_mod_adj: int,
+        rem_pi_sum: int,
     ) -> None:
         self.nodes_expanded += 1
         if count > self.max_depth_reached:
@@ -296,15 +375,26 @@ class BranchAndBoundTSP:
                 return
 
         root = self.root_vertex
-        fast_lb = curr_cost + (
+        fast_lb1 = curr_cost + (
             rem_two_min + self.min1_list[root] + self.min1_list[curr] + 1
         ) // 2
-        if fast_lb >= self.best_cost:
+        if fast_lb1 >= self.best_cost:
             self.nodes_pruned_fast += 1
             return
 
-        if self.n - count > 3:
-            mst_lb = self._compute_mst_lower_bound(curr, curr_cost, visited_mask)
+        fast_lb2 = curr_cost + (
+            rem_mod_adj
+            + self.mod_end_adj[root]
+            + self.mod_end_adj[curr]
+            + HK_TWO_SCALE
+            - 1
+        ) // HK_TWO_SCALE
+        if fast_lb2 >= self.best_cost:
+            self.nodes_pruned_fast += 1
+            return
+
+        if self.n - count > 2:
+            mst_lb = self._compute_mst_lower_bound(curr, curr_cost, visited_mask, rem_pi_sum)
             if mst_lb >= self.best_cost:
                 self.nodes_pruned_mst += 1
                 return
@@ -314,6 +404,9 @@ class BranchAndBoundTSP:
         dist_curr = self.dist_list[curr]
         dist_root = self.dist_list[root]
         two_min_l = self.two_min_list
+        mod_two_l = self.mod_two_adj
+        pi_l = self.pi_list
+
         for nxt in neighbors:
             if nxt == curr or (visited_mask & (1 << nxt)):
                 continue
@@ -344,6 +437,8 @@ class BranchAndBoundTSP:
                     step_cost,
                     visited_mask | (1 << nxt),
                     rem_two_min - two_min_l[nxt],
+                    rem_mod_adj - mod_two_l[nxt],
+                    rem_pi_sum - pi_l[nxt],
                 )
                 if self.aborted:
                     return
@@ -382,7 +477,9 @@ class BranchAndBoundTSP:
             tracemalloc.reset_peak()
 
         self.start_time = time.perf_counter()
-        initial_rem_two_min = int(self.two_min_sum.sum()) - int(self.two_min_sum[root])
+        initial_rem_two_min = int(self.two_min_sum.sum()) - self.two_min_list[root]
+        initial_rem_mod_adj = sum(self.mod_two_adj) - self.mod_two_adj[root]
+        initial_rem_pi = sum(self.pi_list) - self.pi_list[root]
 
         self._dfs(
             curr=root,
@@ -390,6 +487,8 @@ class BranchAndBoundTSP:
             curr_cost=0,
             visited_mask=1 << root,
             rem_two_min=initial_rem_two_min,
+            rem_mod_adj=initial_rem_mod_adj,
+            rem_pi_sum=initial_rem_pi,
         )
 
         if 0 in self.best_tour and self.best_tour[0] != 0:

@@ -9,7 +9,7 @@
 |--- spatial_entropy >  0.79
 |   |--- convex_hull_ratio <= 0.37
 |   |   |--- hopkins_statistic <= 0.46
-|   |   |   |--- value: [10.07]
+|   |   |   |--- value: [10.08]
 |   |   |--- hopkins_statistic >  0.46
 |   |   |   |--- value: [14.60]
 |   |--- convex_hull_ratio >  0.37

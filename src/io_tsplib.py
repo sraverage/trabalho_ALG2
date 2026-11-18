@@ -41,7 +41,7 @@ KNOWN_OPTIMA_EUC2D: dict[str, int] = {
     "ulysses22": 7529,
     "gr24": 1397,
     "fri26": 936,
-    "bayg29": 9077,
+    "bayg29": 9073,
     "bays29": 1957,
     "swiss42": 1304,
     "att48": 33523,

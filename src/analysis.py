@@ -132,9 +132,15 @@ def _build_complexity_regressions(
     rows.append(_fit_polynomial_curve(x_ch, y_ch, _poly3, "a*N^3 + b*N^2 + c", "Christofides Total (ms)"))
     rows.append(_fit_polynomial_curve(x_ch, y_mem, _poly2, "a*N^2 + b*N + c", "Pico Memoria (KiB)"))
 
-    bb_main = chris_df[~chris_df["aborted"]].sort_values("n_vertices")
-    if len(bb_main) < 3:
+    bb_solved = metrics_df[(~metrics_df["aborted"]) & (metrics_df["n_vertices"] <= 40)].copy()
+    if bb_solved.empty:
         bb_main = chris_df[chris_df["n_vertices"] <= 40].sort_values("n_vertices")
+    else:
+        bb_main = (
+            bb_solved.sort_values(["n_vertices", "bb_total_time", "nodes_expanded"])
+            .drop_duplicates(subset=["instance"], keep="first")
+            .sort_values("n_vertices")
+        )
     x_bb = bb_main["n_vertices"].to_numpy(dtype=np.float64)
     y_bb_time = bb_main["bb_total_time"].to_numpy(dtype=np.float64)
     y_bb_nodes = bb_main["nodes_expanded"].to_numpy(dtype=np.float64)
@@ -160,7 +166,7 @@ def _build_complexity_regressions(
     axes[0].legend(fontsize=8)
     axes[0].grid(True, alpha=0.3)
 
-    axes[1].scatter(x_bb, y_bb_nodes, color="#2ca02c", label="Nós Expandidos (Christofides WS)", zorder=3)
+    axes[1].scatter(x_bb, y_bb_nodes, color="#2ca02c", label="Nós Expandidos (Melhor Warm-Start)", zorder=3)
     axes[1].plot(x_bb, pred_n, "--", color="#111111", label="Ajuste Exponencial a·b^N")
     axes[1].set_yscale("log")
     axes[1].set_xlabel("Número de Vértices (N <= 40)")
@@ -188,7 +194,7 @@ def _plot_warm_start_and_subroutines(
     metrics_df: pd.DataFrame,
     plots_dir: Path,
 ) -> None:
-    sub_df = metrics_df[metrics_df["n_vertices"] <= 26].copy()
+    sub_df = metrics_df[metrics_df["n_vertices"] <= 29].copy()
     instances = list(sub_df.sort_values("n_vertices")["instance"].unique())
     strategies = list(STRATEGY_LABELS.keys())
 
@@ -410,21 +416,31 @@ def _export_latex_tables(
     inst_lines = [
         r"\begin{tabular}{lrrrrrrrrr}",
         r"\hline",
-        r"\textbf{Instância} & $N$ & \textbf{Ótimo} & \textbf{Gap NN\%} & \textbf{Gap Hull\%} & \textbf{Gap TAT\%} & \textbf{Gap Chris\%} & \textbf{Nós Exp (Chris)} & \textbf{Tempo B\&B (s)} & \textbf{Speedup} \\",
+        r"\textbf{Instância} & $N$ & \textbf{Ótimo} & \textbf{Gap NN\%} & \textbf{Gap Hull\%} & \textbf{Gap TAT\%} & \textbf{Gap Chris\%} & \textbf{Nós Exp (Melhor WS)} & \textbf{Tempo B\&B (s)} & \textbf{Speedup Máx} \\",
         r"\hline",
     ]
     for _, row in chris_df.iterrows():
         inst = str(row["instance"])
-        opt_str = str(row["optimal_cost"]) if pd.notna(row["optimal_cost"]) and str(row["optimal_cost"]) != "NA" else "NA"
+        inst_rows = metrics_df[metrics_df["instance"] == inst]
+        solved_rows = inst_rows[~inst_rows["aborted"]]
+        if not solved_rows.empty:
+            best_row = solved_rows.sort_values(["bb_total_time", "nodes_expanded"]).iloc[0]
+            opt_val = best_row["optimal_cost"]
+            opt_str = str(int(float(opt_val))) if pd.notna(opt_val) and str(opt_val) != "NA" else "NA"
+            max_speedup = float(solved_rows["net_speedup"].max())
+        else:
+            best_row = hull_df.loc[inst]
+            opt_str = "NA"
+            max_speedup = float(inst_rows["net_speedup"].max())
         inst_lines.append(
             f"{inst} & {int(row['n_vertices'])} & {opt_str} & "
             f"{float(nn_df.loc[inst, 'approx_gap_pct']):.2f} & "
             f"{float(hull_df.loc[inst, 'approx_gap_pct']):.2f} & "
             f"{float(tw_df.loc[inst, 'approx_gap_pct']):.2f} & "
             f"{float(row['approx_gap_pct']):.2f} & "
-            f"{int(row['nodes_expanded'])} & "
-            f"{float(row['bb_total_time']):.3f} & "
-            f"{float(row['net_speedup']):.2f}x \\\\"
+            f"{int(best_row['nodes_expanded'])} & "
+            f"{float(best_row['bb_total_time']):.3f} & "
+            f"{max_speedup:.2f}x \\\\"
         )
     inst_lines.extend([r"\hline", r"\end{tabular}"])
     (tables_dir / "table_instances_summary.tex").write_text("\n".join(inst_lines) + "\n", encoding="utf-8")
