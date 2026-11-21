@@ -1,0 +1,12 @@
+Remover a palavra "critica" 2.
+Na tabela de caracteristicas geometricas fazer uma legenda explicando 
+o significado das colunas
+
+explica melhor ou tira "Figura 2. Comparação em escala logarítmica dos nós expandidos e podados por
+estratégia de warm-start "
+
+Tirar essa formula esquisita do " Nível 1 – Admissibilidade dos Limites de Grau 2 em O(1): "
+ 
+Explicar melhor o nivel 1,2,3 do "2. Implementação, Profiling e Auditoria Crítica"
+
+Esqueleto retórico padrão de LLM: A introdução recorta o problema na clássica tríade (i) ...; (ii) ...; e (iii) .... Quase toda seção repete a mesma fórmula mecânica: uma frase-ponte seguida de lista onde cada item abre com um subtítulo em negrito e dois-pontos (\textbf{...}:). Muletas típicas de modelos em português aparecem em pontos previsíveis ("três questões fundamentais", "Ademais", "revelam três fenômenos estruturais claros", "Por fim").   Prompts "limpos demais" no Anexo: Os quatro prompts listados no fim do documento não parecem comandos reais digitados durante a programação. Eles leem como especificações arquiteturais resumidas a posteriori para cumprir a norma da disciplina, enquanto os blocos de Refatoração e Auditoria Realizada têm exatamente o ritmo de um resumo gerado por agente de código depois de alterar arquivos no repositório.   Tom performático de auditoria: A passagem "Uma implementação ingênua de Branch-and-Bound (frequentemente sugerida por geradores de código sem restrições de engenharia)" soa como um modelo instruído a se diferenciar de "código de IA genérico".   Higiene tipográfica uniforme e placeholders: O documento mantém {,} para vírgula decimal em modo matemático e espaço fino \, antes de unidades (0{,}158\,\text{s}, 2.117{,}81\times, \bigl(...\bigr)) sem um único tropeço do começo ao fim. Trabalhos escritos à mão por um grupo de graduação raramente saem tão homogêneos — e quase nunca vêm com autoria genérica de modelo como Grupo DCC207 e dcc207@dcc.ufmg.br.   Base empírica provavelmente real: Apesar do texto sintético, os números não parecem alucinados do nada. As referências a caminhos reais de saída (../results/tables/table_features.tex, ../results/plots/complexity_regression.pdf), o nome irregular de método _Violates_2opt_geometry destoando do snake_case do resto do projeto e os ajustes específicos de instâncias (ulysses16, bayg29 em 9073) indicam que houve código rodando e gerando tabelas, e a IA redigiu o artigo lendo esses artefatos. 

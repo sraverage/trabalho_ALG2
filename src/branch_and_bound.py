@@ -280,7 +280,7 @@ class BranchAndBoundTSP:
         self.start_time: float = 0.0
         self.bb_mst_bound_time: float = 0.0
 
-    def _Violates_2opt_geometry(self, count: int, curr: int, nxt: int) -> bool:
+    def _violates_2opt_geometry(self, count: int, curr: int, nxt: int) -> bool:
         """Verifica se a aresta (curr, nxt) cruza alguma aresta não adjacente com ganho > 0.
 
         Ao exigir simultaneamente interseção própria no plano e desigualdade estrita
@@ -420,7 +420,7 @@ class BranchAndBoundTSP:
                 self.nodes_pruned_fast += 1
                 continue
 
-            if self.use_geom_pruning and self._Violates_2opt_geometry(count, curr, nxt):
+            if self.use_geom_pruning and self._violates_2opt_geometry(count, curr, nxt):
                 self.nodes_pruned_geom += 1
                 continue
 
