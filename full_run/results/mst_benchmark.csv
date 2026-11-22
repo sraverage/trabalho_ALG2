@@ -1,0 +1,2 @@
+submatrix_size,repetitions,numpy_prim_total_sec,scipy_csgraph_total_sec,speedup_ratio,numpy_prim_peak_kb,scipy_csgraph_peak_kb
+20.0,400.0,0.06056919200000266,0.16555887799995617,2.7333842921323583,2.60546875,71.7138671875

@@ -64,59 +64,59 @@ Quando o ramo passa pelos dois filtros rápidos e ainda restam $|U| \ge 3$ vért
 
 \section{Experimentos e Resultados}
 
-Os testes foram executados em 16 instâncias da TSPLIB avaliadas na métrica \texttt{EUC\_2D} ($N \in [10, 70]$), sendo 12 na faixa principal ($N \le 42$, 75\% do conjunto) e 4 na faixa de estresse ($N \in [48, 70]$, 25\%). A Tabela~\ref{tab:features} resume as seis métricas extraídas de cada instância pelo módulo \texttt{src/features.py}: razão de aspecto da caixa delimitadora (\textit{Aspect}), fração de vértices no fecho convexo (\textit{Hull Ratio}), entropia espacial da distribuição 2D (\textit{Entropia}), estatística de agrupamento de Hopkins (\textit{Hopkins}), grau máximo na árvore geradora mínima (\textit{MST Grau Máx}) e coeficiente de variação das distâncias ao vizinho mais próximo (\textit{NN CV}).
+Os testes foram executados em 16 instâncias avaliadas na métrica \texttt{EUC\_2D} ($N \in [10, 70]$), sendo 12 na faixa principal ($N \le 42$, 75\% do conjunto) e 4 na faixa de estresse ($N \in [48, 70]$, 25\%). Para as instâncias derivadas de coordenadas geográficas ou matrizes explícitas, os resultados referem-se às coordenadas reescalonadas ou reconstruídas em 2D, e não necessariamente à métrica original da TSPLIB. Os ótimos certificados para as instâncias transformadas \texttt{swiss42} e \texttt{att48} são, respectivamente, 1273 e 33522. A Tabela~\ref{tab:features} resume as seis métricas extraídas de cada instância pelo módulo \texttt{src/features.py}: razão de aspecto da caixa delimitadora (\textit{Aspect}), fração de vértices no fecho convexo (\textit{Hull Ratio}), entropia espacial da distribuição 2D (\textit{Entropia}), estatística de agrupamento de Hopkins (\textit{Hopkins}), grau máximo na árvore geradora mínima (\textit{MST Grau Máx}) e coeficiente de variação das distâncias ao vizinho mais próximo (\textit{NN CV}).
 
 \begin{table}[htb]
 \centering
 \caption{Características geométricas e topológicas extraídas das 16 instâncias TSPLIB.}
 \label{tab:features}
 \footnotesize
-\input{../results/tables/table_features.tex}
+\input{../full_run/results/tables/table_features.tex}
 \end{table}
 
 \subsection{Profiling de Subrotinas e Regressão Assintótica}
 
-A Tabela~\ref{tab:regression} e a Figura~\ref{fig:regression} mostram as curvas de complexidade empírica ajustadas com \texttt{scipy.optimize.curve\_fit} e regressão log-linear do \texttt{scikit-learn}. Os tempos de construção da MST via Prim e do algoritmo \textit{Twice-around-the-tree} acompanham bem o comportamento quadrático $O(N^2)$ esperado para grafos densos, com $R^2 = 0,9735$ e $R^2 = 0,9656$. Já no algoritmo de Christofides, a medição separada por subrotina confirma que o passo de emparelhamento perfeito de peso mínimo (algoritmo Blossom do \texttt{networkx}) passa a responder pela maior parte do tempo à medida que $N$ aumenta, resultando em um ajuste cúbico $O(N^3)$ com $R^2 = 0,9185$ para o tempo total do método. O pico de memória RAM também segue de perto a curva quadrática $O(N^2)$ devido ao armazenamento da matriz de distâncias ($R^2 = 0,9837$). Para o \textit{Branch-and-Bound}, considerando as 11 instâncias resolvidas até a otimalidade dentro do limite de tempo ($N \le 29$), o crescimento ajustado foi exponencial da ordem de $0,0596 \cdot (1,628)^N$ nós expandidos ($R^2 = 0,6898$) e $6,27 \times 10^{-7} \cdot (1,682)^N$ s ($R^2 = 0,7016$), onde a dispersão maior em torno da curva reflete o quanto a geometria de cada instância facilita ou dificulta a poda, independentemente do número de cidades.
+A Tabela~\ref{tab:regression} e a Figura~\ref{fig:regression} mostram as curvas de complexidade empírica ajustadas com \texttt{scipy.optimize.curve\_fit} e regressão log-linear do \texttt{scikit-learn}. Os tempos da MST via Prim e do \textit{Twice-around-the-tree} acompanham o modelo quadrático, com $R^2 = 0,9397$ e $R^2 = 0,9317$. Para o emparelhamento Blossom e o tempo total de Christofides, os ajustes cúbico apresentam $R^2 = 0,6246$ e $R^2 = 0,8000$, respectivamente. O ajuste quadrático para o pico de memória obteve $R^2 = 0,9836$. Na regressão do \textit{Branch-and-Bound}, usamos as 11 instâncias com $N \le 29$, pois a análise filtra a faixa $N \le 40$ e nenhuma instância entre 30 e 40 vértices foi avaliada. O crescimento ajustado foi $0,0596 \cdot (1,6285)^N$ nós expandidos ($R^2 = 0,6898$) e $2,52 \times 10^{-6} \cdot (1,6536)^N$ s ($R^2 = 0,6934$). A dispersão em torno das curvas indica que o tamanho não explica sozinho a dificuldade: a geometria e a estratégia de inicialização também afetam a poda.
 
 \begin{table}[htb]
 \centering
 \caption{Modelos de regressão de complexidade empírica (tempo, nós e memória).}
 \label{tab:regression}
 \footnotesize
-\input{../results/tables/table_regression.tex}
+\input{../full_run/results/tables/table_regression.tex}
 \end{table}
 
 \begin{figure}[htb]
 \centering
-\includegraphics[width=0.98\textwidth]{../results/plots/complexity_regression.pdf}
+\includegraphics[width=0.98\textwidth]{../full_run/results/plots/complexity_regression.pdf}
 \caption{Curvas teóricas ajustadas: (a) MST $O(N^2)$ vs. Matching $O(N^3)$; (b) crescimento exponencial de nós no B\&B; (c) pico de memória $O(N^2)$.}
 \label{fig:regression}
 \end{figure}
 
 \subsection{Impacto do Warm-Start na Árvore de Busca e Speedup Líquido}
 
-A Tabela~\ref{tab:summary} e as Figuras~\ref{fig:pruning} e~\ref{fig:speedup} comparam o efeito das cinco estratégias de inicialização sobre o número de nós visitados e o tempo total (já somando o custo da heurística inicial). De modo geral, investir alguns milissegundos em uma heurística mais cuidadosa compensa com folga na fase exata. Em \texttt{berlin12} ($N=12$), por exemplo, partir do \textit{Cold Start} faz o algoritmo expandir 115.717 nós em 1,662 s; usando a Inserção por Fecho Convexo, que já entrega o ciclo ótimo (4056) em 0,60 ms, o \textit{Branch-and-Bound} precisa abrir apenas 12 nós (0,19 ms) para provar a otimalidade, o que representa um \textit{speedup} líquido de 2117,81 vezes (seguido por Christofides, com 317 nós e \textit{speedup} de 353,35 vezes).
+A Tabela~\ref{tab:summary} e as Figuras~\ref{fig:pruning} e~\ref{fig:speedup} comparam o efeito das cinco estratégias sobre a busca exata e o tempo combinado da heurística com o \textit{Branch-and-Bound}. Considerando as 16 instâncias, os gaps médios foram 22,03\% para Vizinho Mais Próximo, 2,35\% para Inserção por Fecho Convexo, 25,63\% para \textit{Twice-around-the-tree} e 9,13\% para Christofides. Em \texttt{berlin12} ($N=12$), a Inserção por Fecho Convexo entrega o ótimo 4056 e reduz a busca a 12 nós, com \textit{speedup} líquido de 3801,06 vezes frente ao \textit{Cold Start}. O maior \textit{speedup} observado foi 12978,52 vezes em \texttt{eil20}, também com a Inserção por Fecho Convexo: a busca certificou o ótimo 243 após expandir 736 nós.
 
-Essa diferença fica mais evidente quando $N$ cresce. Em \texttt{ulysses16} ($N=16$) e \texttt{eil20} ($N=20$), a busca com \textit{Cold Start} estoura o limite de 4,5 s sem terminar, enquanto a inicialização com Christofides fecha a prova de otimalidade de \texttt{ulysses16} (custo 7398) em 0,158 s (8.348 nós, \textit{speedup} de 28,18x) e a Inserção por Fecho Convexo resolve \texttt{eil20} em 0,0054 s (736 nós, \textit{speedup} de 719,41x). Combinando os potenciais de Held-Karp e o \textit{warm-start} por Fecho Convexo, foi possível encontrar e certificar o ótimo de todas as 11 instâncias com $N \le 29$, incluindo \texttt{ulysses22} (custo 7529 em 0,323 s), \texttt{gr24} (1397 em 3,457 s), \texttt{fri26} (936 em 0,013 s, \textit{speedup} de 168,03x), \texttt{bayg29} (9073 em 0,857 s) e \texttt{bays29} (1957 em 2,910 s). Já nas instâncias maiores, a partir de \texttt{swiss42} ($N=42$) até \texttt{st70} ($N=70$), o método exato esbarra no \textit{timeout} em todas as configurações; nesses casos, a Inserção por Fecho Convexo e o algoritmo de Christofides continuam rodando em menos de 3,2 ms e 31,2 ms, respectivamente, mantendo \textit{gaps} médios no conjunto todo de 2,20\% e 8,97\%, bem abaixo do Vizinho Mais Próximo (21,84\%) e do \textit{Twice-around-the-tree} (25,43\%).
+No modo completo, cada chamada ao \textit{Branch-and-Bound} teve limite de 1800 s. Ao menos uma estratégia certificou o ótimo em 13 das 16 instâncias: nas 11 instâncias com $N \le 29$, além de \texttt{swiss42} (custo 1273, certificado pela Inserção por Fecho Convexo e por Christofides) e \texttt{att48} (custo 33522, certificado pela Inserção por Fecho Convexo). As três instâncias restantes (\texttt{eil51}, \texttt{berlin52} e \texttt{st70}) não tiveram o ótimo certificado por nenhuma estratégia; no total, 29 das 80 chamadas foram interrompidas pelo limite de tempo. Mesmo nos casos sem prova de otimalidade, a heurística de Fecho Convexo levou no máximo 15,99 ms e Christofides no máximo 59,80 ms (ambos em \texttt{st70}). Os maiores \textit{speedups} líquidos dessas estratégias foram 12978,52x para Fecho Convexo (\texttt{eil20}) e 400,41x para Christofides (\texttt{berlin12}).
 
 \begin{table}[htb]
 \centering
 \caption{Resumo consolidado de gaps de aproximação, nós expandidos e speedup líquido máximo.}
 \label{tab:summary}
 \scriptsize
-\resizebox{\textwidth}{!}{\input{../results/tables/table_instances_summary.tex}}
+\resizebox{\textwidth}{!}{\input{../full_run/results/tables/table_instances_summary.tex}}
 \end{table}
 
 \begin{figure}[htb]
 \centering
-\includegraphics[width=0.98\textwidth]{../results/plots/warm_start_pruning.pdf}
+\includegraphics[width=0.98\textwidth]{../full_run/results/plots/warm_start_pruning.pdf}
 \caption{Nós expandidos (barras cheias) e ramos podados pelo funil de limites inferiores (barras hachuradas) em escala logarítmica para cada estratégia de warm-start ($N \le 29$).}
 \label{fig:pruning}
 \end{figure}
 
 \begin{figure}[htb]
 \centering
-\includegraphics[width=0.98\textwidth]{../results/plots/warm_start_speedup.pdf}
+\includegraphics[width=0.98\textwidth]{../full_run/results/plots/warm_start_speedup.pdf}
 \caption{Speedup líquido frente ao Cold Start (esquerda) e decomposição de tempo das subrotinas no algoritmo de Christofides (direita).}
 \label{fig:speedup}
 \end{figure}
@@ -130,19 +130,19 @@ Para investigar quais propriedades geométricas fazem os algoritmos aproximados 
 \caption{Importância relativa das features topológicas (Random Forest) e coeficiente de determinação $R^2$.}
 \label{tab:sensitivity}
 \footnotesize
-\resizebox{\textwidth}{!}{\input{../results/tables/table_sensitivity.tex}}
+\resizebox{\textwidth}{!}{\input{../full_run/results/tables/table_sensitivity.tex}}
 \end{table}
 
 \begin{figure}[htb]
 \centering
-\includegraphics[width=0.98\textwidth]{../results/plots/sensitivity_analysis.pdf}
+\includegraphics[width=0.98\textwidth]{../full_run/results/plots/sensitivity_analysis.pdf}
 \caption{Matriz de correlação de Spearman (esquerda) e importância das features via Random Forest (direita).}
 \label{fig:sensitivity}
 \end{figure}
 
-A variável com maior peso explicativo na maioria dos modelos é a proporção de vértices no fecho convexo (\texttt{convex\_hull\_ratio}), que responde por 60,9\% da importância na Inserção por Fecho Convexo ($R^2 = 0,871$), 58,4\% na taxa de poda do B\&B ($R^2 = 0,853$), 40,4\% no Vizinho Mais Próximo ($R^2 = 0,728$) e 26,3\% no algoritmo de Christofides ($R^2 = 0,879$). A correlação de Spearman entre \texttt{convex\_hull\_ratio} e o erro é fortemente negativa ($\rho = -0,675$ para Fecho Convexo e $\rho = -0,593$ para Christofides): quando boa parte das cidades está na borda externa (como em \texttt{eil10}, \texttt{berlin12} e \texttt{burma14}), o contorno do fecho convexo já define quase toda a ordem ótima de visitação e o erro das heurísticas fica próximo de zero. Por outro lado, à medida que surgem muitos pontos no interior do polígono ($\texttt{convex\_hull\_ratio} \le 0,37$ aliado a $\texttt{spatial\_entropy} > 0,79$, caso de \texttt{gr24}, \texttt{bays29}, \texttt{berlin52} e \texttt{att48}), a árvore de decisão indica que o \textit{gap} médio de Christofides sobe da faixa de 1,37\%--2,95\% para 10,08\% quando os pontos são mais espalhados ($\texttt{hopkins\_statistic} \le 0,46$) e chega a 14,60\% quando há agrupamentos bem marcados ($\texttt{hopkins\_statistic} > 0,46$).
+A proporção de vértices no fecho convexo (\texttt{convex\_hull\_ratio}) foi a feature mais importante para o gap da Inserção por Fecho Convexo (65,8\%), a taxa de poda do B\&B (61,5\%), o Vizinho Mais Próximo (37,5\%) e Christofides (30,7\%). Os respectivos $R^2$ do Random Forest foram 0,897, 0,856, 0,745 e 0,879. A correlação de Spearman entre \texttt{convex\_hull\_ratio} e o gap foi $\rho=-0,704$ para Fecho Convexo e $\rho=-0,628$ para Christofides. Para o \textit{Twice-around-the-tree}, destacaram-se a razão de aspecto (44,9\% de importância; $\rho=0,622$) e o coeficiente de variação das distâncias ao vizinho mais próximo (22,2\%; $\rho=-0,612$). A árvore de decisão estimou gaps de Christofides entre 11,01\% e 16,21\% para instâncias com entropia espacial acima de 0,79 e \texttt{convex\_hull\_ratio} de no máximo 0,37; o valor previsto foi maior quando \texttt{hopkins\_statistic} excedeu 0,53. Como os modelos foram ajustados e avaliados sobre apenas 16 instâncias, esses resultados são descritivos e não demonstram causalidade nem garantem generalização.
 
-O algoritmo \textit{Twice-around-the-tree} apresentou um perfil diferente dos demais: nele, a razão de aspecto (\texttt{aspect\_ratio}, com 49,2\% de importância e $\rho = +0,636$) e a variação das distâncias ao vizinho mais próximo (\texttt{nn\_cv}, com 19,1\%) foram os fatores predominantes ($R^2 = 0,883$). Isso ocorre porque duplicar a MST e percorrê-la em profundidade força atalhos longos toda vez que a travessia termina um ramo e precisa saltar para outra subárvore, o que penaliza principalmente nuvens de pontos mais quadradas (\texttt{aspect\_ratio} alto) e com várias ramificações de comprimento parecido. Já na busca exata, o peso da estatística de Hopkins (25,9\% na taxa de poda do B\&B e 20,5\% no \textit{gap} de Christofides) mostra que instâncias com \textit{clusters} internos geram muitas combinações de subciclos com custos próximos; sem a penalização de Held-Karp para distinguir as arestas que ligam esses grupos, a 1-árvore simples produz limites inferiores baixos e a quantidade de nós abertos explode rapidamente.
+Na taxa de poda do B\&B, a estatística de Hopkins teve importância de 23,8\% no Random Forest, e sua correlação de Spearman com a taxa de poda foi $\rho=0,468$. Esse padrão sugere associação entre a estrutura espacial e a eficácia da poda, mas deve ser interpretado com cautela devido ao tamanho reduzido da amostra e ao caráter observacional da análise.
 
 \section{Conclusões}
 
