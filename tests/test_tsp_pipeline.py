@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
@@ -27,6 +28,8 @@ from src.profiler import profile_block
 
 class TestTSPPipeline(unittest.TestCase):
     def setUp(self) -> None:
+        self.repo_root = Path(__file__).resolve().parent.parent
+        self.data_dir = self.repo_root / "data" / "tsplib"
         self.square_coords = np.array(
             [
                 [0.0, 0.0],
@@ -45,10 +48,8 @@ class TestTSPPipeline(unittest.TestCase):
         self.assertEqual(int(self.square_dist[0, 1]), 10)
         self.assertEqual(int(self.square_dist[0, 2]), 14)
 
-        perimeter = compute_tour_cost(self.square_dist, [0, 1, 2, 3])
-        crossed = compute_tour_cost(self.square_dist, [0, 2, 1, 3])
-        self.assertEqual(perimeter, 40)
-        self.assertEqual(crossed, 48)
+        self.assertEqual(compute_tour_cost(self.square_dist, [0, 1, 2, 3]), 40)
+        self.assertEqual(compute_tour_cost(self.square_dist, [0, 2, 1, 3]), 48)
 
     def test_validate_tour_rejects_invalid_inputs(self) -> None:
         with self.assertRaises(ValueError):
@@ -68,8 +69,10 @@ class TestTSPPipeline(unittest.TestCase):
             )
             coords = parse_tsplib(tsp_file)
             self.assertEqual(coords.shape, (4, 2))
-            dist = compute_euc2d_matrix(coords)
-            self.assertEqual(int(dist[0, 1]), 5)
+            self.assertEqual(int(compute_euc2d_matrix(coords)[0, 1]), 5)
+
+            with self.assertRaises(FileNotFoundError):
+                parse_tsplib(Path(tmpdir) / "inexistente.tsp")
 
         telemetry: dict[str, float] = {}
         with profile_block(telemetry, "subroutine"):
@@ -82,8 +85,7 @@ class TestTSPPipeline(unittest.TestCase):
         self.assertGreater(telemetry["peak_memory_kb"], 0.0)
 
     def test_ensure_tsplib_dataset_completeness(self) -> None:
-        data_dir = Path(__file__).resolve().parent.parent / "data" / "tsplib"
-        paths = ensure_tsplib_dataset(data_dir)
+        paths = ensure_tsplib_dataset(self.data_dir)
         self.assertEqual(len(paths), 16)
         sizes = [len(parse_tsplib(p)) for p in paths]
         self.assertEqual(sizes, sorted(sizes))
@@ -93,8 +95,7 @@ class TestTSPPipeline(unittest.TestCase):
     def test_extract_instance_features_invariants(self) -> None:
         angles = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
         circle_coords = np.column_stack([100.0 * np.cos(angles), 100.0 * np.sin(angles)])
-        circle_dist = compute_euc2d_matrix(circle_coords)
-        feats_circle = extract_instance_features(circle_coords, circle_dist)
+        feats_circle = extract_instance_features(circle_coords, compute_euc2d_matrix(circle_coords))
 
         self.assertAlmostEqual(feats_circle["convex_hull_ratio"], 1.0, places=5)
         self.assertAlmostEqual(feats_circle["aspect_ratio"], 1.0, places=2)
@@ -114,16 +115,16 @@ class TestTSPPipeline(unittest.TestCase):
             ],
             dtype=np.float64,
         )
-        clustered_dist = compute_euc2d_matrix(clustered_coords)
-        feats_clustered = extract_instance_features(clustered_coords, clustered_dist)
+        feats_clustered = extract_instance_features(
+            clustered_coords, compute_euc2d_matrix(clustered_coords)
+        )
         self.assertLess(feats_clustered["convex_hull_ratio"], 1.0)
         self.assertGreater(feats_clustered["nn_cv"], feats_circle["nn_cv"])
         self.assertGreater(feats_clustered["hopkins_statistic"], 0.5)
 
     def test_all_five_warm_start_strategies(self) -> None:
-        data_dir = Path(__file__).resolve().parent.parent / "data" / "tsplib"
-        ensure_tsplib_dataset(data_dir)
-        coords = parse_tsplib(data_dir / "ulysses16.tsp")
+        ensure_tsplib_dataset(self.data_dir)
+        coords = parse_tsplib(self.data_dir / "ulysses16.tsp")
         dist = compute_euc2d_matrix(coords)
         n = len(coords)
 
@@ -147,9 +148,8 @@ class TestTSPPipeline(unittest.TestCase):
         self.assertLessEqual(costs["christofides"], costs["cold_start"])
 
     def test_branch_and_bound_exactness_across_all_warm_starts(self) -> None:
-        data_dir = Path(__file__).resolve().parent.parent / "data" / "tsplib"
-        ensure_tsplib_dataset(data_dir)
-        coords = parse_tsplib(data_dir / "eil10.tsp")
+        ensure_tsplib_dataset(self.data_dir)
+        coords = parse_tsplib(self.data_dir / "eil10.tsp")
         dist = compute_euc2d_matrix(coords)
 
         strategies = [
@@ -170,10 +170,8 @@ class TestTSPPipeline(unittest.TestCase):
             opt_val = res["optimal_cost"]
             self.assertIsNotNone(opt_val)
             assert isinstance(opt_val, int)
-            best_tour = res["best_tour"]
-            assert isinstance(best_tour, list)
-            validate_tour(best_tour, len(coords))
-            self.assertEqual(opt_val, compute_tour_cost(dist, best_tour))
+            validate_tour(res["best_tour"], len(coords))
+            self.assertEqual(opt_val, compute_tour_cost(dist, res["best_tour"]))
             self.assertLessEqual(opt_val, ub_cost)
             opt_costs.append(opt_val)
             expanded_counts[name] = res["nodes_expanded"]
@@ -185,9 +183,8 @@ class TestTSPPipeline(unittest.TestCase):
         self.assertGreater(bench["speedup_ratio"], 0.1)
 
     def test_timeout_abort_and_telemetry_preservation(self) -> None:
-        data_dir = Path(__file__).resolve().parent.parent / "data" / "tsplib"
-        ensure_tsplib_dataset(data_dir)
-        coords = parse_tsplib(data_dir / "berlin52.tsp")
+        ensure_tsplib_dataset(self.data_dir)
+        coords = parse_tsplib(self.data_dir / "berlin52.tsp")
         dist = compute_euc2d_matrix(coords)
         ub, tour, _ = cold_start_tsp(coords, dist)
         solver = BranchAndBoundTSP(coords, dist, time_limit=0.001)
@@ -198,17 +195,31 @@ class TestTSPPipeline(unittest.TestCase):
         self.assertGreater(res["peak_memory_kb"], 0.0)
 
     def test_checkpoint_skip_and_analysis_tables(self) -> None:
-        base_dir = Path(__file__).resolve().parent.parent
-        metrics_csv = base_dir / "results" / "metrics_log.csv"
-        features_csv = base_dir / "results" / "features_log.csv"
-        if metrics_csv.is_file() and features_csv.is_file():
-            before_size = metrics_csv.stat().st_size
-            out = run_pipeline(base_dir=base_dir, mode="fast-test", custom_time_limit=0.05, reset=False)
-            after_size = metrics_csv.stat().st_size
+        # Executa em diretório temporário para nunca sobrescrever os artefatos finais de results/.
+        real_metrics = self.repo_root / "results" / "metrics_log.csv"
+        real_features = self.repo_root / "results" / "features_log.csv"
+        self.assertTrue(real_metrics.is_file())
+        self.assertTrue(real_features.is_file())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_root = Path(tmpdir)
+            (tmp_root / "data").mkdir()
+            (tmp_root / "data" / "tsplib").symlink_to(self.data_dir)
+            tmp_results = tmp_root / "results"
+            tmp_results.mkdir()
+
+            tmp_metrics = tmp_results / "metrics_log.csv"
+            shutil.copy2(real_metrics, tmp_metrics)
+            shutil.copy2(real_features, tmp_results / "features_log.csv")
+
+            before_size = tmp_metrics.stat().st_size
+            out = run_pipeline(base_dir=tmp_root, mode="fast-test", custom_time_limit=0.05, reset=False)
+            after_size = tmp_metrics.stat().st_size
+
             self.assertEqual(before_size, after_size)
             self.assertIn("analysis", out)
-            self.assertTrue((base_dir / "results" / "plots" / "complexity_regression.pdf").is_file())
-            self.assertTrue((base_dir / "results" / "tables" / "table_regression.tex").is_file())
+            self.assertTrue((tmp_results / "plots" / "complexity_regression.pdf").is_file())
+            self.assertTrue((tmp_results / "tables" / "table_regression.tex").is_file())
 
 
 if __name__ == "__main__":

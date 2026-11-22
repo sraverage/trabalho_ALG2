@@ -7,27 +7,44 @@ from scipy.stats import entropy
 from sklearn.cluster import DBSCAN
 
 
-def _compute_hopkins_deterministic(norm_coords: np.ndarray, tree: KDTree) -> float:
-    """Estatística de Hopkins determinística (semente fixa) no hiper-retângulo [0,1]^2.
+def _compute_hopkins_statistic(norm_coords: np.ndarray) -> float:
+    """Calcula a estatística de Hopkins com semente fixa para reprodutibilidade.
 
-    Compara a média das distâncias quadráticas de pontos de sondagem uniformes U para
-    os pontos reais (u_sq) contra a média das distâncias quadráticas ao vizinho mais
-    próximo entre os próprios pontos reais (w_sq). Valores próximos de 1 indicam forte
-    agrupamento espacial (clusters); valores próximos de 0.5 indicam distribuição de Poisson.
+    Valores próximos de 1 indicam forte agrupamento espacial; valores próximos de 0.5
+    sugerem distribuição aleatória uniforme; valores baixos indicam regularidade.
     """
     rng = np.random.default_rng(42)
-    probe_points = rng.uniform(0.0, 1.0, size=(max(64, len(norm_coords) * 2), 2))
+    num_probes = max(64, len(norm_coords) * 2)
+    probe_points = rng.uniform(0.0, 1.0, size=(num_probes, 2))
 
-    u_dists, _ = tree.query(probe_points, k=1)
-    w_dists_all, _ = tree.query(norm_coords, k=2)
-    w_dists = w_dists_all[:, 1]
+    tree = KDTree(norm_coords)
+    probe_dists, _ = tree.query(probe_points, k=1)
+    real_dists, _ = tree.query(norm_coords, k=2)
 
-    u_mean = float(np.mean(np.square(u_dists)))
-    w_mean = float(np.mean(np.square(w_dists)))
+    u_mean = float(np.mean(np.square(probe_dists)))
+    w_mean = float(np.mean(np.square(real_dists[:, 1])))
     denom = u_mean + w_mean
-    if denom <= 1e-12:
-        return 0.5
-    return u_mean / denom
+    return u_mean / denom if denom > 1e-12 else 0.5
+
+
+def _compute_spatial_entropy(norm_coords: np.ndarray) -> float:
+    """Entropia de Shannon normalizada em [0, 1] sobre uma grade 2D das coordenadas."""
+    n = len(norm_coords)
+    bins = max(2, int(np.ceil(np.sqrt(n / 2.0))))
+    hist_2d, _, _ = np.histogram2d(
+        norm_coords[:, 0],
+        norm_coords[:, 1],
+        bins=bins,
+        range=[[0.0, 1.0], [0.0, 1.0]],
+    )
+
+    probs = hist_2d.ravel()
+    total = float(probs.sum())
+    if total > 0.0:
+        probs = probs / total
+
+    max_entropy = float(np.log(bins * bins))
+    return float(entropy(probs)) / max_entropy if max_entropy > 0.0 else 0.0
 
 
 def extract_instance_features(coords: np.ndarray, dist_matrix: np.ndarray) -> dict[str, float]:
@@ -45,24 +62,11 @@ def extract_instance_features(coords: np.ndarray, dist_matrix: np.ndarray) -> di
     hull = ConvexHull(arr)
     convex_hull_ratio = float(len(hull.vertices)) / float(n)
 
-    mins = arr.min(axis=0)
     safe_spans = np.where(spans > 1e-12, spans, 1.0)
-    norm_coords = (arr - mins) / safe_spans
+    norm_coords = (arr - arr.min(axis=0)) / safe_spans
 
-    bins = max(2, int(np.ceil(np.sqrt(n / 2.0))))
-    hist_2d, _, _ = np.histogram2d(
-        norm_coords[:, 0],
-        norm_coords[:, 1],
-        bins=bins,
-        range=[[0.0, 1.0], [0.0, 1.0]],
-    )
-    flat_probs = hist_2d.ravel()
-    total_mass = float(flat_probs.sum())
-    if total_mass > 0.0:
-        flat_probs = flat_probs / total_mass
-    raw_entropy = float(entropy(flat_probs))
-    max_entropy = float(np.log(bins * bins))
-    spatial_entropy = raw_entropy / max_entropy if max_entropy > 0.0 else 0.0
+    spatial_entropy = _compute_spatial_entropy(norm_coords)
+    hopkins_statistic = _compute_hopkins_statistic(norm_coords)
 
     tree = KDTree(arr)
     nn_query_dists, _ = tree.query(arr, k=2)
@@ -70,18 +74,14 @@ def extract_instance_features(coords: np.ndarray, dist_matrix: np.ndarray) -> di
     mean_nn = float(np.mean(nn_dists))
     nn_cv = float(np.std(nn_dists) / mean_nn) if mean_nn > 1e-12 else 0.0
 
-    norm_tree = KDTree(norm_coords)
-    hopkins_statistic = _compute_hopkins_deterministic(norm_coords, norm_tree)
-
+    # Usa o percentil 75 das distâncias ao vizinho mais próximo como escala natural do DBSCAN.
     eps_val = max(float(np.percentile(nn_dists, 75)) * 1.35, 1e-6)
     dbscan = DBSCAN(eps=eps_val, min_samples=max(2, min(4, n // 5))).fit(arr)
-    clustered_ratio = float(np.mean(dbscan.labels_ >= 0))
+    cluster_density = float(np.mean(dbscan.labels_ >= 0))
 
     mst_sparse = minimum_spanning_tree(dist_matrix.astype(np.float64))
     mst_adj = (mst_sparse.toarray() > 0).astype(np.int64)
     degrees = mst_adj.sum(axis=0) + mst_adj.sum(axis=1)
-    mst_max_degree = float(np.max(degrees))
-    mst_std_degree = float(np.std(degrees))
 
     return {
         "n_vertices": float(n),
@@ -89,8 +89,8 @@ def extract_instance_features(coords: np.ndarray, dist_matrix: np.ndarray) -> di
         "convex_hull_ratio": convex_hull_ratio,
         "spatial_entropy": spatial_entropy,
         "hopkins_statistic": hopkins_statistic,
-        "cluster_density": clustered_ratio,
-        "mst_max_degree": mst_max_degree,
-        "mst_std_degree": mst_std_degree,
+        "cluster_density": cluster_density,
+        "mst_max_degree": float(np.max(degrees)),
+        "mst_std_degree": float(np.std(degrees)),
         "nn_cv": nn_cv,
     }

@@ -17,12 +17,12 @@ Este repositório contém a implementação completa, instrumentada e auditada d
 
 ```text
 trabalho_22/
-├── main.py                         # Orquestrador CLI com checkpointing incremental e timeout
+├── main.py                         # Orquestrador CLI com checkpointing incremental e timeout (1800s no modo full)
 ├── requirements.txt                # Dependências declaradas (numpy, scipy, networkx, scikit-learn, pandas, matplotlib)
 ├── enunciado_trabalho.pdf          # Enunciado oficial do TP2 (DCC207)
 ├── TECHNICAL-SPEC.md               # Especificação técnica de contratos, invariantes e complexidade
 ├── PLAN.md                         # Plano atômico de execução e testes
-├── README.md                       # Documentação técnica detalhada do funcionamento e entregas
+├── README.md                       # Documentação técnica detalhada do funcionamento e resultados
 ├── data/
 │   └── tsplib/                     # 16 instâncias TSPLIB padronizadas na métrica EUC_2D (N entre 10 e 70)
 ├── src/
@@ -35,9 +35,9 @@ trabalho_22/
 │   ├── branch_and_bound.py         # Motor exato DFS In-Place + Held-Karp + funil de poda em 3 níveis + benchmark MST
 │   └── analysis.py                 # Regressões assintóticas, gráficos (.png/.pdf), sensibilidade e tabelas LaTeX
 ├── results/
-│   ├── metrics_log.csv             # Base completa de telemetria (80 execuções: 16 instâncias x 5 estratégias)
+│   ├── metrics_log.csv             # Base completa do modo full (80 execuções: 16 instâncias x 5 estratégias, timeout 1800s)
 │   ├── features_log.csv            # Features geométricas e topológicas das 16 instâncias
-│   ├── mst_benchmark.csv           # Benchmark comparativo Prim in-place vs SciPy csgraph (submatriz 20x20)
+│   ├── mst_benchmark.csv           # Benchmark comparativo Prim denso em NumPy vs SciPy csgraph (submatriz 20x20)
 │   ├── regression_models.csv       # Parâmetros ajustados, R² e RMSE das curvas de complexidade
 │   ├── sensitivity_importance.csv  # Importância das features (Random Forest) e R² por alvo
 │   ├── decision_tree_rules.txt     # Regras extraídas da DecisionTreeRegressor (profundidade 3) para Gap Christofides
@@ -45,18 +45,18 @@ trabalho_22/
 │   └── tables/                     # Tabelas prontas para \input{} no LaTeX (.tex)
 ├── report/
 │   ├── relatorio_sbc.tex           # Código-fonte do artigo científico em padrão SBC (com Anexo de Prompts)
-│   ├── relatorio_sbc.pdf           # Relatório final compilado (10 páginas)
+│   ├── relatorio_sbc.pdf           # Relatório final compilado
 │   ├── references.bib              # Referências bibliográficas BibTeX
 │   ├── sbc-template.sty            # Estilo oficial SBC
 │   └── sbc.bst                     # Estilo bibliográfico SBC
 ├── tests/
-│   └── test_tsp_pipeline.py        # Suíte de 9 testes unitários e de integração end-to-end
+│   └── test_tsp_pipeline.py        # Suíte de 9 testes unitários e de integração end-to-end (isolados em TempDir)
 └── tp2_tsp/                        # Diretório compatível com symlinks para data/, src/, results/, main.py e requirements.txt
 ```
 
 ---
 
-## 2. Como Tudo Funciona (Arquitetura e Detalhes Algorítmicos)
+## 2. Arquitetura e Detalhes Algorítmicos
 
 ### 2.1. Ingestão TSPLIB, Padronização `EUC_2D` e Matriz de Distâncias (`src/io_tsplib.py`)
 
@@ -64,7 +64,7 @@ O conjunto experimental é composto por **16 instâncias da TSPLIB** variando de
 - **Faixa Principal ($N \le 42$, 12 instâncias — 75% do conjunto):** `eil10`, `berlin12`, `burma14`, `ulysses16`, `st18`, `eil20`, `ulysses22`, `gr24`, `fri26`, `bayg29`, `bays29`, `swiss42`.
 - **Faixa Limite / Estresse ($N \in [48, 70]$, 4 instâncias — 25% do conjunto):** `att48`, `eil51`, `berlin52`, `st70`.
 
-Como várias instâncias clássicas da TSPLIB nessa faixa de tamanho originalmente usam coordenadas geográficas em graus (`burma14`, `ulysses16`, `ulysses22`) ou matrizes explícitas de distância (`gr24`, `fri26`, `bays29`, `swiss42`), `ensure_tsplib_dataset` padroniza todo o conjunto para coordenadas bidimensionais `EUC_2D`:
+Como várias instâncias clássicas da TSPLIB nessa faixa originalmente usam coordenadas geográficas em graus (`burma14`, `ulysses16`, `ulysses22`) ou matrizes explícitas de distância (`gr24`, `fri26`, `bays29`, `swiss42`), `ensure_tsplib_dataset` padroniza todo o conjunto para coordenadas bidimensionais `EUC_2D`:
 1. Instâncias `GEO` recebem reescalonamento homotético ($\times 100$) para evitar que cidades próximas colapsem para distância inteira $0$ sob arredondamento.
 2. Instâncias explícitas são projetadas em $\mathbb{R}^2$ via **Imersão Espectral Clássica de Torgerson (MDS)** em `_classical_mds_2d` usando `scipy.linalg.eigh` sobre a matriz de Gram duplamente centrada $B = -\frac{1}{2} H D^2 H$.
 3. Subinstâncias menores (`eil10`, `berlin12`, `st18`, `eil20`) são extraídas de prefixos determinísticos das instâncias `EUC_2D` originais (`eil51`, `berlin52`, `st70`).
@@ -79,110 +79,93 @@ O cálculo do custo fechado de qualquer ciclo hamiltoniano (`compute_tour_cost`)
 
 O *context manager* `profile_block(telemetry, prefix)` encapsula cada subrotina crítica (`mst`, `matching`, `eulerian`, `shortcutting`, `dfs_preorder`, `convex_hull`, `hull_insertion`, `heuristic_total`):
 - Mede o tempo de parede com `time.perf_counter()`.
-- Mede o pico de memória alocada com `tracemalloc`. Quando um rastreamento pai já está ativo, utiliza `tracemalloc.reset_peak()` para isolar o pico específico da subrotina sem interromper o contexto externo.
+- Mede o pico de memória alocada com `tracemalloc`, utilizando `tracemalloc.reset_peak()` em blocos aninhados para isolar o pico da subrotina sem interromper o contexto externo.
 - Registra `<prefix>_time` (segundos), `<prefix>_peak_kb` (KiB) e atualiza `peak_memory_kb`.
 
 ---
 
 ### 2.3. Extração de Features Geométricas e Topológicas (`src/features.py`)
 
-A função `extract_instance_features(coords, dist_matrix)` extrai métricas estruturais para explicar a dificuldade de cada instância:
+`extract_instance_features(coords, dist_matrix)` extrai:
 - `aspect_ratio`: razão $\frac{\min(\Delta x, \Delta y)}{\max(\Delta x, \Delta y)} \in (0, 1]$ do *bounding box* via `np.ptp(arr, axis=0)`.
 - `convex_hull_ratio`: fração de vértices pertencentes ao fecho convexo (`len(ConvexHull(arr).vertices) / N`).
-- `spatial_entropy`: entropia de Shannon normalizada (`scipy.stats.entropy`) sobre histograma 2D (`np.histogram2d`) das coordenadas normalizadas em $[0, 1]^2$.
-- `hopkins_statistic`: estatística determinística de Hopkins (semente fixa `42`) via `scipy.spatial.KDTree`, comparando distâncias quadráticas ao vizinho mais próximo de pontos de sondagem uniformes contra os pontos reais (valores maiores indicam maior tendência a *clusters*).
-- `cluster_density`: fração de vértices agrupados pelo `sklearn.cluster.DBSCAN` (não classificados como ruído `-1`).
-- `mst_max_degree` e `mst_std_degree`: grau máximo (presença de *hubs*) e desvio-padrão dos graus na MST obtida por `scipy.sparse.csgraph.minimum_spanning_tree`.
+- `spatial_entropy`: entropia de Shannon normalizada (`scipy.stats.entropy`) sobre histograma 2D (`np.histogram2d`) das coordenadas em $[0, 1]^2$.
+- `hopkins_statistic`: estatística determinística de Hopkins (semente `42`) via `scipy.spatial.KDTree`.
+- `cluster_density`: fração de vértices agrupados pelo `sklearn.cluster.DBSCAN`.
+- `mst_max_degree` e `mst_std_degree`: grau máximo (*hubs*) e desvio-padrão dos graus na MST via `scipy.sparse.csgraph.minimum_spanning_tree`.
 - `nn_cv`: coeficiente de variação ($\sigma / \mu$) das distâncias ao vizinho mais próximo via `KDTree(..., k=2)`.
 
 ---
 
 ### 2.4. Heurísticas de *Warm-Start* e Algoritmos Aproximados (`src/heuristics.py`, `src/approximations.py`)
 
-Todas as cinco estratégias seguem o contrato único `(cost, tour, telemetry)` retornando uma permutação válida iniciada em `0`:
+Todas as cinco estratégias seguem o contrato `(cost, tour, telemetry)` retornando uma permutação válida iniciada em `0`:
 
 1. **Cold Start (`cold_start_tsp`):** rota trivial `[0, 1, ..., N-1]`. Complexidade $\mathcal{O}(N)$.
-2. **Vizinho Mais Próximo (`nearest_neighbor_tsp`):** construção gulosa a partir do vértice `0` mascarando visitados e escolhendo `np.argmin` em cada passo. Complexidade $\mathcal{O}(N^2)$.
-3. **Inserção por Fecho Convexo (`convex_hull_insertion_tsp`):** inicializa a sub-rota com os vértices de `scipy.spatial.ConvexHull(coords)` e, a cada iteração, avalia de forma **vetorizada** via `np.ix_` a matriz de custo marginal $\Delta(u, v, k) = d_{uk} + d_{kv} - d_{uv}$ para todos os nós livres $k$ e todas as arestas $(u, v)$ do subciclo, inserindo o par ótimo até fechar o tour e rotacionando para iniciar em `0`.
-4. **Twice-around-the-tree (`twice_around_the_tree_tsp`):** constrói o grafo completo em `NetworkX` (incluindo explicitamente eventuais arestas de peso `0` entre pontos coincidentes após arredondamento), extrai a MST com `nx.minimum_spanning_tree(..., algorithm="prim")` sob `profile_block(..., "mst")` e percorre em pré-ordem com `nx.dfs_preorder_nodes(..., source=0)` sob `profile_block(..., "dfs_preorder")`. Garantia de 2-aproximação no caso métrico.
-5. **Christofides-Serdyukov (`christofides_tsp`):** extrai a MST via Prim (`"mst"`), filtra vértices de grau ímpar, calcula o emparelhamento perfeito de peso mínimo com `nx.algorithms.matching.min_weight_matching` — algoritmo Blossom de Edmonds (`"matching"`), une as arestas em um `nx.MultiGraph` e extrai o circuito euleriano via `nx.eulerian_circuit` (`"eulerian"`), realizando *shortcutting* linear (`"shortcutting"`). Garantia teórica de $3/2$-aproximação.
+2. **Vizinho Mais Próximo (`nearest_neighbor_tsp`):** construção gulosa a partir do vértice `0` mascarando visitados e escolhendo `np.argmin`. Complexidade $\mathcal{O}(N^2)$.
+3. **Inserção por Fecho Convexo (`convex_hull_insertion_tsp`):** inicializa a sub-rota com `scipy.spatial.ConvexHull(coords)` e avalia de forma vetorizada (`np.ix_`) o custo marginal $\Delta(u, v, k) = d_{uk} + d_{kv} - d_{uv}$ para inserir iterativamente os vértices internos.
+4. **Twice-around-the-tree (`twice_around_the_tree_tsp`):** monta o grafo completo em `NetworkX` (restaurando eventuais arestas de peso `0` entre pontos coincidentes), extrai a MST via Prim (`"mst"`) e percorre em pré-ordem (`"dfs_preorder"`).
+5. **Christofides-Serdyukov (`christofides_tsp`):** extrai a MST (`"mst"`), calcula o emparelhamento perfeito de peso mínimo sobre vértices ímpares com `min_weight_matching` — algoritmo Blossom de Edmonds (`"matching"`), constrói o multigrafo euleriano (`"eulerian"`) e realiza *shortcutting* linear (`"shortcutting"`).
 
 ---
 
 ### 2.5. Motor Exato *Branch-and-Bound* (`src/branch_and_bound.py`)
 
-Para evitar esgotamento de RAM e pressão de *garbage collection* típicos de *Best-First Search* (`heapq` com cópias de matrizes $\mathcal{O}(N^2)$ na fronteira), o `BranchAndBoundTSP` implementa **Busca em Profundidade (DFS *In-Place*)** com espaço de pilha estritamente $\mathcal{O}(N)$:
+Para evitar esgotamento de RAM típico de *Best-First Search*, `BranchAndBoundTSP` implementa **DFS *In-Place*** com espaço de pilha $\mathcal{O}(N)$:
 
-1. **Representação de Estado em *Bitmask*:** o conjunto de vértices visitados é um inteiro Python `visited_mask` manipulado com operações bit-a-bit em $\mathcal{O}(1)$ (`visited_mask & (1 << u)` e `visited_mask | (1 << u)`).
-2. **Pivotamento na Raiz por *Outlier* e Quebra de Simetria:** a busca é enraizada em `root_vertex = argmax_v (d_(1)(v) + d_(2)(v))`, decidindo na raiz e na folha as arestas do vértice mais isolado (crítico em instâncias como `ulysses16`). Na penúltima camada (`count == n - 1`), impõe-se `path[1] < nxt` para eliminar $50\%$ das rotas espelhadas equivalentes. Ao fim, o melhor ciclo é rotacionado de volta ao vértice `0`.
-3. **Potenciais Lagrangianos de Held-Karp em Ponto Fixo (`_compute_hk_potentials`):** antes da DFS, o construtor executa até `180` iterações de ascensão por subgradiente sobre 1-árvores enraizadas em `root_vertex` com passo tipo Polyak amortecido e centrado ($\sum_v \pi_v = 0$). Os multiplicadores são convertidos para inteiros em escala fixa `HK_SCALE = 256` (`self.pi_int`), gerando a matriz de custos penalizados $\tilde{d}_{uv} = 256 \cdot d_{uv} + \Pi_u + \Pi_v$.
-4. **Ordenação de Vizinhos por Custo Reduzido:** para cada vértice, os vizinhos candidatos são pré-ordenados por $\tilde{d}_{uv} - \lfloor \min_w \tilde{d}_{wv} / 2 \rfloor$, guiando a DFS diretamente pelos arcos promissores da relaxação de Held-Karp.
-5. **Funil de Poda em 3 Níveis Estritamente Admissível:**
-   - **Nível 1 — Limites Rápidos de Grau 2 em $\mathcal{O}(1)$:** verifica dois limites incrementais: o limite de grau 2 original $\text{LB}_{\text{fast}}$ (usando apenas 1 menor aresta nos extremos `root` e `curr`, e 2 menores arestas nos vértices livres $U$) e o limite penalizado $\text{LB}_{\text{fast}}^{(\Pi)}$ em escala `HK_TWO_SCALE = 512`. Também poda transições cujo custo parcial `curr_cost + dist_curr[nxt] >= best_cost`.
-   - **Nível 2 — Filtro Geométrico 2-Opt sob Discretização `EUC_2D` (`_violates_2opt_geometry`):** descarta a aresta `(curr, nxt)` apenas quando há interseção própria no plano via teste de orientação CCW (`_segments_strictly_intersect`) **e** ganho inteiro estrito $d(u,v) + d(\text{curr},\text{nxt}) > d(u,\text{curr}) + d(v,\text{nxt})$, evitando descartar empates de arredondamento inteiro.
-   - **Nível 3 — Relaxação Lagrangiana de 1-Árvore de Held-Karp (`_compute_mst_lower_bound`):** para $|U| \ge 3$, calcula o peso da MST sobre $U$ na matriz penalizada $\tilde{d}$ via Prim denso *in-place* em listas Python (`_reduce_prim_edges`), soma as duas menores conexões de `root` e `curr` para $U$, desconta $\Pi_{\text{root}} + \Pi_{\text{curr}} + 2\sum_{u \in U}\Pi_u$ e aplica teto inteiro exato sobre `256`.
-6. **Controle de Timeout de Baixo *Overhead*:** verifica `time.perf_counter()` apenas a cada `1024` nós (`(nodes_expanded & 1023) == 0`). Quando o tempo expira, registra `aborted = True`, grava `"NA"` em `optimal_cost` e preserva toda a telemetria (`nodes_expanded`, contadores por tipo de poda, `best_ub_found_so_far`, `max_depth_reached`, `peak_memory_kb`).
-7. **Benchmark Isolado de Subrotina MST (`benchmark_mst_subroutines`):** compara diretamente a implementação densa em NumPy (`_mst_weight_numpy_prim`) contra `scipy.sparse.csgraph.minimum_spanning_tree` em submatrizes $20 \times 20$.
+1. **Estado em *Bitmask*:** conjunto de visitados em um inteiro `visited_mask` manipulado em $\mathcal{O}(1)$.
+2. **Pivotamento por *Outlier* e Quebra de Simetria:** enraíza a busca em `root_vertex = argmax_v (d_(1)(v) + d_(2)(v))` e impõe `path[1] < nxt` na folha para eliminar rotas espelhadas.
+3. **Potenciais Lagrangianos de Held-Karp (`_compute_hk_potentials`):** 180 iterações de subgradiente em ponto fixo (`HK_SCALE = 256`), ordenando vizinhos pelo custo reduzido $\tilde{d}_{uv} - \lfloor \min_w \tilde{d}_{wv} / 2 \rfloor$.
+4. **Funil de Poda em 3 Níveis Admissível:**
+   - **Nível 1 ($\mathcal{O}(1)$):** limites de grau 2 original e penalizado em ponto fixo.
+   - **Nível 2 ($\mathcal{O}(k)$):** filtro geométrico 2-Opt exigindo interseção própria **e** ganho inteiro estrito na métrica `EUC_2D`.
+   - **Nível 3:** relaxação de 1-árvore de Held-Karp sobre não-visitados ($|U| \ge 3$) via Prim denso em listas Python (`_reduce_prim_edges`) com teto inteiro exato.
+5. **Timeout Amortizado:** checa `time.perf_counter()` a cada `1024` nós (`(nodes_expanded & 1023) == 0`), gravando `"NA"` em `optimal_cost` quando abortado e preservando toda a telemetria.
 
 ---
 
-### 2.6. Pipeline com Checkpointing e Análise Estatística (`main.py`, `src/analysis.py`)
+## 3. Principais Resultados Obtidos (Execução Completa — Timeout de 30 min)
 
-- **Checkpointing Incremental:** a cada par `(instance, strategy)` concluído, `main.py` escreve a linha imediatamente em `results/metrics_log.csv` com `flush()`. Caso interrompido, uma nova execução sem `--reset` carrega os pares já concluídos e retoma de onde parou.
-- **Modelagem Assintótica (`_build_complexity_regressions`):** ajusta curvas via `scipy.optimize.curve_fit` ($aN^2 + bN + c$ para MST, Twice-around e Pico de Memória; $aN^3 + bN^2 + c$ para Matching Blossom e Christofides) e regressão log-linear (`sklearn.linear_model.LinearRegression`) para tempo e nós expandidos do B&B ($a \cdot b^N$) sobre instâncias resolvidas na faixa $N \le 40$, calculando $R^2$ e RMSE.
-- **Avaliação de *Speedup* Líquido:** calcula $\text{Speedup} = \frac{T_{\text{B\&B}}(\text{Cold Start})}{T_{\text{Heurística}} + T_{\text{B\&B}}(\text{Warm-Start})}$ para responder se o investimento de tempo na heurística inicial compensa.
-- **Análise de Sensibilidade (`_run_sensitivity_analysis`):** treina `RandomForestRegressor(n_estimators=100, random_state=42)` e `DecisionTreeRegressor(max_depth=3, random_state=42)` sobre as 6 features topológicas para prever os gaps percentuais e a taxa de poda do B&B, além de gerar a matriz de correlação de Spearman e exportar gráficos (`.png` / `.pdf`) e tabelas LaTeX (`.tex`).
+Todos os números abaixo correspondem à base consolidada em `results/` (modo `full`, `1800 s` por execução):
 
----
-
-## 3. O Que Foi Feito e Principais Resultados Obtidos
-
-### Resumo das Implementações e Auditorias Aplicadas
-- Implementação completa dos 7 módulos de produção em `src/`, orquestrador `main.py`, suíte de testes em `tests/test_tsp_pipeline.py` e artigo científico SBC em `report/relatorio_sbc.tex` (`10` páginas compiladas em `report/relatorio_sbc.pdf`).
-- **Correções algorítmicas auditadas:**
-  - Padronização `EUC_2D` via reescalonamento `GEO` ($\times 100$) e projeção espectral MDS para matrizes explícitas (incluindo atualização do ótimo de referência exato de `bayg29` em `EUC_2D` para `9073`).
-  - Correção da admissibilidade do limite rápido de grau 2 nos extremos do caminho parcial e verificação de desigualdade estrita inteira no filtro geométrico 2-Opt.
-  - Pivotamento na raiz pelo vértice *outlier* e incorporação de multiplicadores lagrangianos de Held-Karp em ponto fixo (`HK_SCALE = 256`), resolvendo **100% das instâncias até $N = 29$** (11 das 12 instâncias da faixa principal — $91{,}7\%$) dentro do orçamento de `4,5 s` do modo `fast-test`.
-
-### Principais Descobertas Empíricas (Base `results/`)
-1. **Benchmark MST (`results/mst_benchmark.csv`):** para 400 repetições em submatrizes $20 \times 20$, o Prim denso em NumPy levou `0,0349 s` com pico de `2,50 KiB`, sendo **$2{,}69\times$ mais rápido** e consumindo **$7{,}56\times$ menos memória** que `scipy.sparse.csgraph.minimum_spanning_tree` (`0,0940 s` e `18,87 KiB`).
+1. **Benchmark MST (`results/mst_benchmark.csv`):** em 400 repetições sobre submatrizes $20 \times 20$, o Prim denso em NumPy levou `0,0606 s` com pico de `2,61 KiB`, sendo **$2{,}73\times$ mais rápido** e consumindo **$27{,}5\times$ menos memória** que `scipy.sparse.csgraph.minimum_spanning_tree` (`0,1656 s` e `71,71 KiB`).
 2. **Regressões Assintóticas (`results/regression_models.csv`):**
-   - `MST Prim (ms)`: $\mathcal{O}(N^2)$ com $R^2 = 0{,}9735$ ($\text{RMSE} = 0{,}5150\,\text{ms}$).
-   - `Twice-Around Total (ms)`: $\mathcal{O}(N^2)$ com $R^2 = 0{,}9656$ ($\text{RMSE} = 0{,}5901\,\text{ms}$).
-   - `Matching Blossom (ms)`: $\mathcal{O}(N^3)$ com $R^2 = 0{,}7916$; `Christofides Total (ms)`: $R^2 = 0{,}9185$.
-   - `Pico Memoria (KiB)`: $\mathcal{O}(N^2)$ com $R^2 = 0{,}9837$.
-   - `B&B` ($N \le 29$, melhor estratégia resolvida): crescimento exponencial $\approx 0{,}0596 \cdot (1{,}628)^N$ nós ($R^2 = 0{,}6898$) e $\approx 6{,}27\times 10^{-7} \cdot (1{,}682)^N\,\text{s}$ ($R^2 = 0{,}7016$).
+   - `MST Prim (ms)`: $\mathcal{O}(N^2)$ com $R^2 = 0{,}9397$ ($\text{RMSE} = 1{,}7781\,\text{ms}$).
+   - `Twice-Around Total (ms)`: $\mathcal{O}(N^2)$ com $R^2 = 0{,}9317$ ($\text{RMSE} = 1{,}9498\,\text{ms}$).
+   - `Matching Blossom (ms)`: $\mathcal{O}(N^3)$ com $R^2 = 0{,}6246$; `Christofides Total (ms)`: $R^2 = 0{,}8000$.
+   - `Pico Memoria (KiB)`: $\mathcal{O}(N^2)$ com $R^2 = 0{,}9836$.
+   - `B&B` ($N \le 29$, melhor estratégia resolvida na faixa $N \le 40$): crescimento exponencial $\approx 0{,}0596 \cdot (1{,}6285)^N$ nós ($R^2 = 0{,}6898$) e $\approx 2{,}52 \times 10^{-6} \cdot (1{,}6536)^N\,\text{s}$ ($R^2 = 0{,}6934$).
 3. **Impacto do *Warm-Start* (`results/metrics_log.csv`):**
-   - **Inserção por Fecho Convexo** atingiu gap médio de apenas **`2,20%`** (tempo máximo `3,19 ms` em `st70`) e resolveu exatamente todas as 11 instâncias até $N=29$, gerando *speedups* líquidos de até **`2.117,81x`** (`berlin12`), **`719,41x`** (`eil20`), **`168,03x`** (`fri26`) e **`23,68x`** (`ulysses16`).
-   - **Christofides** atingiu gap médio de **`8,97%`** (tempo máximo `31,18 ms` em `st70`), resolvendo 7 instâncias exatamente com *speedups* de até **`353,35x`** (`berlin12`), **`39,92x`** (`st18`) e **`28,18x`** (`ulysses16`).
-   - Na faixa de estresse ($N \in [42, 70]$), o *Branch-and-Bound* esgota o orçamento de tempo registrando `"NA"` em `optimal_cost` com telemetria preservada, enquanto as heurísticas finalizam em poucos milissegundos.
+   - **13 das 16 instâncias** tiveram o ótimo certificado dentro de 1800 s (todas as 11 até $N = 29$, mais `swiss42 = 1273` e `att48 = 33522`); 29 das 80 execuções atingiram o limite de tempo (`eil51`, `berlin52` e `st70` não foram certificadas por nenhuma estratégia).
+   - **Inserção por Fecho Convexo** atingiu gap médio de **`2,35%`** (tempo máximo `15,99 ms` em `st70`), certificou 13 instâncias e gerou *speedups* líquidos de até **`12.978,52x`** (`eil20`), **`3.801,06x`** (`berlin12`), **`1.258,49x`** (`ulysses22`) e **`894,38x`** (`bayg29`).
+   - **Christofides** atingiu gap médio de **`9,13%`** (tempo máximo `59,80 ms` em `st70`), certificou 11 instâncias (incluindo `swiss42`) e alcançou *speedup* máximo de **`400,41x`** (`berlin12`).
+   - **Gaps médios das demais estratégias:** Vizinho Mais Próximo `22,03%` e *Twice-around-the-tree* `25,63%`.
 4. **Sensibilidade Topológica (`results/sensitivity_importance.csv` e `results/decision_tree_rules.txt`):**
-   - `convex_hull_ratio` é a feature dominante na explicação do gap da Inserção por Fecho Convexo (`60,9%`, $R^2 = 0{,}871$), Vizinho Mais Próximo (`40,4%`, $R^2 = 0{,}728$), Taxa de Poda do B&B (`58,4%`, $R^2 = 0{,}853$, $\rho = -0{,}815$) e Christofides (`26,3%`, $R^2 = 0{,}879$, $\rho = -0{,}593$).
-   - `aspect_ratio` (`49,2%`, $\rho = +0{,}636$) e `nn_cv` (`19,1%`) dominam o erro de `Twice-around-the-tree` ($R^2 = 0{,}883$).
-   - Instâncias com alta entropia espacial (`spatial_entropy > 0,79`), baixa fração no fecho convexo (`convex_hull_ratio <= 0,37`) e forte agrupamento (`hopkins_statistic > 0,46`) elevam o gap médio de Christofides para **`14,60%`**.
+   - `convex_hull_ratio` domina a explicação do gap da Inserção por Fecho Convexo (`65,8%`, $R^2 = 0{,}897$, $\rho = -0{,}704$), da Taxa de Poda do B&B (`61,5%`, $R^2 = 0{,}856$, $\rho = -0{,}829$), do Vizinho Mais Próximo (`37,5%`, $R^2 = 0{,}745$) e de Christofides (`30,7%`, $R^2 = 0{,}879$, $\rho = -0{,}628$).
+   - `aspect_ratio` (`44,9%`, $\rho = +0{,}622$) e `nn_cv` (`22,2%`, $\rho = -0{,}612$) dominam o erro de `Twice-around-the-tree` ($R^2 = 0{,}881$).
+   - A árvore de decisão aponta gaps elevados de Christofides (`11,01%` a `16,21%`) quando `spatial_entropy > 0,79`, `convex_hull_ratio <= 0,37` e `hopkins_statistic > 0,53` (ex.: `att48` com `17,87%` e `berlin52` com `14,55%`).
 
 ---
 
 ## 4. Como Executar e Reproduzir
 
 ### Pré-requisitos
-Crie/use o ambiente virtual `.venv` com os pacotes de `requirements.txt` (`numpy`, `scipy`, `networkx`, `scikit-learn`, `pandas`, `matplotlib`):
-
 ```bash
 source .venv/bin/activate
 ```
 
 ### Executar Testes Unitários e de Integração
+Os testes são isolados em diretórios temporários e não alteram os resultados finais em `results/`:
 ```bash
 .venv/bin/python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 ### Executar o Pipeline Experimental
-- **Modo de validação rápida** (regera todos os logs em `results/`, gráficos e tabelas LaTeX em ~1,5 minuto):
+- **Modo de validação rápida** (regera logs, gráficos e tabelas em ~1,5 minuto):
   ```bash
   .venv/bin/python main.py --mode fast-test --reset
   ```
-- **Modo oficial completo** (timeout de `1800s` = 30 minutos por chamada ao B&B, com retomada automática via checkpoint se interrompido):
+- **Modo oficial completo** (timeout de `1800s` = 30 minutos por chamada ao B&B, com retomada automática via checkpoint):
   ```bash
   .venv/bin/python main.py --mode full
   ```

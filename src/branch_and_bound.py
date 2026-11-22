@@ -7,9 +7,12 @@ from typing import TypedDict
 import numpy as np
 from scipy.sparse.csgraph import minimum_spanning_tree
 
+from src.io_tsplib import compute_tour_cost
 
+
+# Escala inteira fixa para os potenciais de Held-Karp; evita erros de ponto flutuante no teto.
 HK_SCALE = 256
-HK_TWO_SCALE = 512
+HK_TWO_SCALE = 2 * HK_SCALE
 
 
 class BnBResult(TypedDict):
@@ -30,37 +33,36 @@ class BnBResult(TypedDict):
 
 
 def _reduce_prim_edges(
-    min_e: list[int],
-    nodes: list[int],
-    dist_list: list[list[int]],
+    min_edge: list[int],
+    remaining: list[int],
+    weight_rows: list[list[int]],
 ) -> int:
-    """Executa os passos gulosos de Prim sobre listas de distâncias já inicializadas."""
+    """Executa Prim denso em listas Python puras para evitar overhead de arrays pequenos na DFS."""
     total = 0
-    for _ in range(len(nodes)):
+    for _ in range(len(remaining)):
         best_val = 10**15
         best_idx = 0
-        for idx, val in enumerate(min_e):
+        for idx, val in enumerate(min_edge):
             if val < best_val:
                 best_val = val
                 best_idx = idx
+
         total += best_val
-        u = nodes[best_idx]
-        min_e.pop(best_idx)
-        nodes.pop(best_idx)
-        row_u = dist_list[u]
-        for idx, v in enumerate(nodes):
+        u = remaining[best_idx]
+        min_edge.pop(best_idx)
+        remaining.pop(best_idx)
+
+        row_u = weight_rows[u]
+        for idx, v in enumerate(remaining):
             d = row_u[v]
-            if d < min_e[idx]:
-                min_e[idx] = d
+            if d < min_edge[idx]:
+                min_edge[idx] = d
+
     return total
 
 
 def _mst_weight_numpy_prim(sub_mat: np.ndarray) -> int:
-    """Prim denso in-place em NumPy para submatrizes pequenas no interior do B&B.
-
-    Evita a conversão para matriz esparsa CSR e a alocação de objetos Python do SciPy
-    em chamadas milhões de vezes para k <= 70.
-    """
+    """Prim denso em NumPy para comparar com a conversão CSR do SciPy em submatrizes pequenas."""
     k = sub_mat.shape[0]
     if k <= 1:
         return 0
@@ -69,21 +71,22 @@ def _mst_weight_numpy_prim(sub_mat: np.ndarray) -> int:
 
     in_mst = np.zeros(k, dtype=bool)
     in_mst[0] = True
-    min_e = sub_mat[0].copy()
+    min_edge = sub_mat[0].copy()
     inf_val = int(np.max(sub_mat)) + 1
     total = 0
 
     for _ in range(k - 1):
-        masked = np.where(in_mst, inf_val, min_e)
+        masked = np.where(in_mst, inf_val, min_edge)
         u = int(np.argmin(masked))
         in_mst[u] = True
-        total += int(min_e[u])
-        np.minimum(min_e, sub_mat[u], out=min_e)
+        total += int(min_edge[u])
+        np.minimum(min_edge, sub_mat[u], out=min_edge)
+
     return total
 
 
 def _mst_weight_scipy(sub_mat: np.ndarray) -> int:
-    """MST via scipy.sparse.csgraph.minimum_spanning_tree para comparação de overhead."""
+    """Peso da MST via scipy.sparse.csgraph para benchmark de overhead."""
     if sub_mat.shape[0] <= 1:
         return 0
     return int(round(float(minimum_spanning_tree(sub_mat).sum())))
@@ -94,7 +97,7 @@ def benchmark_mst_subroutines(
     sub_size: int = 20,
     repetitions: int = 500,
 ) -> dict[str, float]:
-    """Compara empiricamente o tempo e a memória do Prim vetorizado vs SciPy csgraph."""
+    """Compara tempo e memória do Prim denso em NumPy contra scipy.sparse.csgraph."""
     k = min(sub_size, dist_matrix.shape[0])
     sub_mat = dist_matrix[:k, :k].copy()
     sub_mat_float = sub_mat.astype(np.float64)
@@ -135,80 +138,77 @@ def _segments_strictly_intersect(
     dx: float,
     dy: float,
 ) -> bool:
-    """Teste de orientação CCW em O(1) para interseção própria entre (a,b) e (c,d)."""
+    """Testa interseção própria entre os segmentos (a, b) e (c, d) via orientação CCW."""
     ccw_acd = (dy - ay) * (cx - ax) > (cy - ay) * (dx - ax)
     ccw_bcd = (dy - by) * (cx - bx) > (cy - by) * (dx - bx)
     if ccw_acd == ccw_bcd:
         return False
+
     ccw_abc = (cy - ay) * (bx - ax) > (by - ay) * (cx - ax)
     ccw_abd = (dy - ay) * (bx - ax) > (by - ay) * (dx - ax)
     return ccw_abc != ccw_abd
 
 
 def _compute_hk_potentials(dist: np.ndarray, root: int, iters: int = 180) -> np.ndarray:
-    """Calcula multiplicadores lagrangianos de Held-Karp em ponto fixo (escala HK_SCALE).
-
-    Executa ascensão por subgradiente sobre 1-árvores enraizadas em `root` com passo
-    do tipo Polyak amortecido e centrado (soma zero). Os potenciais inteiros escalonados
-    preservam estritamente a admissibilidade de qualquer relaxação sobre subconjuntos
-    de vértices sem arredondamento otimista.
-    """
+    """Estima multiplicadores lagrangianos de Held-Karp (em ponto fixo) por ascensão de subgradiente."""
     n = dist.shape[0]
-    pi = np.zeros(n, dtype=np.float64)
     if n < 4:
         return np.zeros(n, dtype=np.int64)
 
+    pi = np.zeros(n, dtype=np.float64)
     d_float = dist.astype(np.float64)
     others = [v for v in range(n) if v != root]
     others_arr = np.asarray(others, dtype=np.int64)
+    k = n - 1
+
     best_lb = -1e18
     best_pi = pi.copy()
     step = 2.0
 
     for it in range(iters):
-        mod_d = d_float + pi[:, None] + pi[None, :]
-        np.fill_diagonal(mod_d, 1e15)
-        sub = mod_d[np.ix_(others_arr, others_arr)]
-        k = n - 1
+        penalized = d_float + pi[:, None] + pi[None, :]
+        np.fill_diagonal(penalized, 1e15)
+        sub = penalized[np.ix_(others_arr, others_arr)]
+
         in_mst = np.zeros(k, dtype=bool)
         in_mst[0] = True
-        min_e = sub[0].copy()
+        min_edge = sub[0].copy()
         parent = np.zeros(k, dtype=np.int64)
-        deg = np.zeros(n, dtype=np.int64)
-        mst_w = 0.0
+        degree = np.zeros(n, dtype=np.int64)
+        mst_weight = 0.0
 
         for _ in range(k - 1):
-            masked = np.where(in_mst, 1e15, min_e)
-            u = int(np.argmin(masked))
+            u = int(np.argmin(np.where(in_mst, 1e15, min_edge)))
             in_mst[u] = True
-            mst_w += float(min_e[u])
+            mst_weight += float(min_edge[u])
+
             p = int(parent[u])
-            deg[others[u]] += 1
-            deg[others[p]] += 1
-            better = sub[u] < min_e
-            min_e = np.where(better, sub[u], min_e)
+            degree[others[u]] += 1
+            degree[others[p]] += 1
+
+            better = sub[u] < min_edge
+            min_edge = np.where(better, sub[u], min_edge)
             parent = np.where(better, u, parent)
 
-        row_r = mod_d[root, others_arr]
-        idx2 = np.argsort(row_r)[:2]
-        e1, e2 = int(idx2[0]), int(idx2[1])
-        deg[root] = 2
-        deg[others[e1]] += 1
-        deg[others[e2]] += 1
+        root_edges = penalized[root, others_arr]
+        e1, e2 = (int(i) for i in np.argsort(root_edges)[:2])
+        degree[root] = 2
+        degree[others[e1]] += 1
+        degree[others[e2]] += 1
 
-        lb = mst_w + float(row_r[e1] + row_r[e2]) - 2.0 * float(np.sum(pi))
+        lb = mst_weight + float(root_edges[e1] + root_edges[e2]) - 2.0 * float(np.sum(pi))
         if lb > best_lb:
             best_lb = lb
             best_pi = pi.copy()
 
-        subgrad = deg - 2
-        norm_sq = int(np.sum(subgrad * subgrad))
+        subgradient = degree - 2
+        norm_sq = int(np.sum(subgradient * subgradient))
         if norm_sq == 0:
             break
 
+        # Passo tipo Polyak amortecido e centrado para manter soma(pi) == 0.
         gap = max(best_lb * 0.12 * (0.90 ** (it // 5)), 0.5) + (best_lb - lb)
-        alpha = step * gap / norm_sq
-        pi = pi + alpha * subgrad
+        pi = pi + (step * gap / norm_sq) * subgradient
         pi -= np.mean(pi)
         if (it + 1) % 20 == 0:
             step *= 0.75
@@ -217,7 +217,7 @@ def _compute_hk_potentials(dist: np.ndarray, root: int, iters: int = 180) -> np.
 
 
 class BranchAndBoundTSP:
-    """Algoritmo Exato Branch-and-Bound via DFS In-Place com Bitmask e Funil de Poda."""
+    """Resolvedor exato do TSP usando DFS in-place, bitmask e funil de poda em 3 níveis."""
 
     def __init__(
         self,
@@ -240,9 +240,11 @@ class BranchAndBoundTSP:
         self.min1_list: list[int] = self.min1.tolist()
         self.two_min_sum = (sorted_dists[:, 1] + sorted_dists[:, 2]).astype(np.int64)
         self.two_min_list: list[int] = self.two_min_sum.tolist()
-        self.root_vertex: int = int(np.argmax(self.two_min_sum))
 
-        self.pi_int: np.ndarray = _compute_hk_potentials(self.dist, self.root_vertex)
+        # Fixar a raiz no vértice mais isolado antecipa a decisão das arestas mais caras.
+        self.root_vertex = int(np.argmax(self.two_min_sum))
+
+        self.pi_int = _compute_hk_potentials(self.dist, self.root_vertex)
         self.pi_list: list[int] = self.pi_int.tolist()
 
         mod_dist = (self.dist * HK_SCALE + self.pi_int[:, None] + self.pi_int[None, :]).astype(
@@ -265,31 +267,29 @@ class BranchAndBoundTSP:
         self.sorted_neighbors = np.argsort(reduced_cost, axis=1).astype(np.int64)
         self.neighbors_list: list[list[int]] = self.sorted_neighbors.tolist()
 
-        self.best_cost: int = 0
+        self.best_cost = 0
         self.best_tour: list[int] = []
         self.path: list[int] = [0] * self.n
 
-        self.nodes_expanded: int = 0
-        self.nodes_pruned_fast: int = 0
-        self.nodes_pruned_geom: int = 0
-        self.nodes_pruned_mst: int = 0
-        self.nodes_pruned_symmetry: int = 0
-        self.max_depth_reached: int = 1
-        self.aborted: bool = False
+        self.nodes_expanded = 0
+        self.nodes_pruned_fast = 0
+        self.nodes_pruned_geom = 0
+        self.nodes_pruned_mst = 0
+        self.nodes_pruned_symmetry = 0
+        self.max_depth_reached = 1
+        self.aborted = False
 
-        self.start_time: float = 0.0
-        self.bb_mst_bound_time: float = 0.0
+        self.start_time = 0.0
+        self.bb_mst_bound_time = 0.0
 
     def _violates_2opt_geometry(self, count: int, curr: int, nxt: int) -> bool:
-        """Verifica se a aresta (curr, nxt) cruza alguma aresta não adjacente com ganho > 0.
+        """Retorna True se (curr, nxt) cruza uma aresta anterior com ganho inteiro estrito.
 
-        Ao exigir simultaneamente interseção própria no plano e desigualdade estrita
-        d(a,b) + d(c,d) > d(a,c) + d(b,d) na matriz inteira EUC_2D, garante-se que
-        qualquer completamento do caminho parcial admitiria um movimento 2-Opt válido
-        estritamente melhor, preservando a exatidão sob arredondamento inteiro.
+        Exigir ganho estrito evita descartar empates criados pelo arredondamento inteiro EUC_2D.
         """
         if count < 3:
             return False
+
         cx = float(self.coords[curr, 0])
         cy = float(self.coords[curr, 1])
         dx = float(self.coords[nxt, 0])
@@ -316,14 +316,7 @@ class BranchAndBoundTSP:
         visited_mask: int,
         rem_pi_sum: int,
     ) -> int:
-        """Calcula a relaxação lagrangiana de 1-Árvore com potenciais de Held-Karp sobre U.
-
-        Para o caminho parcial de `root` até `curr`, qualquer completamento hamiltoniano
-        sobre os não-visitados U forma uma árvore geradora em U acrescida de duas conexões
-        aos extremos `root` e `curr`. Somando as arestas penalizadas (d_ij * M + pi_i + pi_j)
-        e subtraindo os potenciais acumulados (pi[root] + pi[curr] + 2 * sum_{u in U} pi[u]),
-        obtém-se um limite inferior inteiro estritamente admissível via teto exato.
-        """
+        """Calcula o limite inferior de 1-árvore sobre os vértices não visitados U."""
         t0 = time.perf_counter()
         root = self.root_vertex
         unvisited = [u for u in range(self.n) if not (visited_mask & (1 << u))]
@@ -331,26 +324,25 @@ class BranchAndBoundTSP:
         if self.mst_mode == "scipy_csgraph":
             idx_arr = np.asarray(unvisited, dtype=np.int64)
             sub_mat = self.dist[np.ix_(idx_arr, idx_arr)]
-            mst_w = _mst_weight_scipy(sub_mat.astype(np.float64))
-            min_0 = int(self.dist[root, idx_arr].min())
+            mst_weight = _mst_weight_scipy(sub_mat.astype(np.float64))
+            min_root = int(self.dist[root, idx_arr].min())
             min_curr = int(self.dist[curr, idx_arr].min())
             self.bb_mst_bound_time += time.perf_counter() - t0
-            return curr_cost + mst_w + min_0 + min_curr
+            return curr_cost + mst_weight + min_root + min_curr
 
         mod_list = self.mod_list
         pi_list = self.pi_list
         mr = mod_list[root]
         mc = mod_list[curr]
-        k = len(unvisited)
 
         u0 = unvisited[0]
         row0 = mod_list[u0]
-        min_e = [row0[unvisited[j]] for j in range(1, k)]
-        mst_w = _reduce_prim_edges(min_e, unvisited[1:], mod_list)
+        min_edge = [row0[unvisited[j]] for j in range(1, len(unvisited))]
+        mst_weight = _reduce_prim_edges(min_edge, unvisited[1:], mod_list)
 
         min_r = min(mr[u] for u in unvisited)
         min_c = min(mc[u] for u in unvisited)
-        scaled_rem = mst_w + min_r + min_c - pi_list[root] - pi_list[curr] - 2 * rem_pi_sum
+        scaled_rem = mst_weight + min_r + min_c - pi_list[root] - pi_list[curr] - 2 * rem_pi_sum
 
         self.bb_mst_bound_time += time.perf_counter() - t0
         return curr_cost + (scaled_rem + HK_SCALE - 1) // HK_SCALE
@@ -369,12 +361,15 @@ class BranchAndBoundTSP:
         if count > self.max_depth_reached:
             self.max_depth_reached = count
 
+        # Checa o timeout a cada 1024 nós para evitar custo de syscall em cada chamada.
         if (self.nodes_expanded & 1023) == 0:
             if time.perf_counter() - self.start_time > self.time_limit:
                 self.aborted = True
                 return
 
         root = self.root_vertex
+
+        # Nível 1: limites rápidos de grau 2 (original e com potenciais de Held-Karp).
         fast_lb1 = curr_cost + (
             rem_two_min + self.min1_list[root] + self.min1_list[curr] + 1
         ) // 2
@@ -393,6 +388,7 @@ class BranchAndBoundTSP:
             self.nodes_pruned_fast += 1
             return
 
+        # Nível 3: 1-árvore de Held-Karp quando ainda restam ao menos 3 vértices livres.
         if self.n - count > 2:
             mst_lb = self._compute_mst_lower_bound(curr, curr_cost, visited_mask, rem_pi_sum)
             if mst_lb >= self.best_cost:
@@ -411,6 +407,7 @@ class BranchAndBoundTSP:
             if nxt == curr or (visited_mask & (1 << nxt)):
                 continue
 
+            # Quebra de simetria em grafos não-direcionados: descarta a direção reversa na folha.
             if count == n - 1 and self.path[1] > nxt:
                 self.nodes_pruned_symmetry += 1
                 continue
@@ -420,6 +417,7 @@ class BranchAndBoundTSP:
                 self.nodes_pruned_fast += 1
                 continue
 
+            # Nível 2: filtro geométrico 2-Opt sobre a aresta candidata (curr, nxt).
             if self.use_geom_pruning and self._violates_2opt_geometry(count, curr, nxt):
                 self.nodes_pruned_geom += 1
                 continue
@@ -448,11 +446,10 @@ class BranchAndBoundTSP:
         initial_ub: int | None = None,
         initial_tour: list[int] | None = None,
     ) -> BnBResult:
-        """Executa a busca exata Branch-and-Bound inicializada com o warm-start fornecido."""
+        """Executa o Branch-and-Bound a partir do limite superior inicial fornecido."""
         if initial_ub is None or initial_tour is None:
             default_tour = list(range(self.n))
-            idx = np.asarray(default_tour, dtype=np.int64)
-            self.best_cost = int(self.dist[idx, np.roll(idx, -1)].sum())
+            self.best_cost = compute_tour_cost(self.dist, default_tour)
             self.best_tour = default_tour
         else:
             self.best_cost = int(initial_ub)
@@ -471,26 +468,23 @@ class BranchAndBoundTSP:
         self.bb_mst_bound_time = 0.0
 
         already_tracing = tracemalloc.is_tracing()
-        if not already_tracing:
-            tracemalloc.start()
-        else:
+        if already_tracing:
             tracemalloc.reset_peak()
+        else:
+            tracemalloc.start()
 
         self.start_time = time.perf_counter()
-        initial_rem_two_min = int(self.two_min_sum.sum()) - self.two_min_list[root]
-        initial_rem_mod_adj = sum(self.mod_two_adj) - self.mod_two_adj[root]
-        initial_rem_pi = sum(self.pi_list) - self.pi_list[root]
-
         self._dfs(
             curr=root,
             count=1,
             curr_cost=0,
             visited_mask=1 << root,
-            rem_two_min=initial_rem_two_min,
-            rem_mod_adj=initial_rem_mod_adj,
-            rem_pi_sum=initial_rem_pi,
+            rem_two_min=int(self.two_min_sum.sum()) - self.two_min_list[root],
+            rem_mod_adj=sum(self.mod_two_adj) - self.mod_two_adj[root],
+            rem_pi_sum=sum(self.pi_list) - self.pi_list[root],
         )
 
+        # Normaliza o ciclo final para iniciar no vértice 0.
         if 0 in self.best_tour and self.best_tour[0] != 0:
             zero_pos = self.best_tour.index(0)
             self.best_tour = self.best_tour[zero_pos:] + self.best_tour[:zero_pos]

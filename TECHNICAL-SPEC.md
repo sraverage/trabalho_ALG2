@@ -2,7 +2,7 @@
 
 ## 1. Mapeamento Estrutural e Reutilização de Abstrações
 
-O repositório inicial contém apenas o enunciado (`enunciado_trabalho.pdf`) e o plano diretor (`plano_de_implementação.md`). Seguindo a diretriz de zero reinvenção de algoritmos clássicos já otimizados em C/Fortran, o sistema delega operações geométricas, matriciais, espectrais, estatísticas e de grafos às seguintes bibliotecas:
+O repositório implementa o TP2 de Algoritmos 2 conforme `enunciado_trabalho.pdf`. Seguindo a diretriz de zero reinvenção de algoritmos clássicos já otimizados em C/Fortran, o sistema delega operações geométricas, matriciais, espectrais, estatísticas e de grafos às seguintes bibliotecas:
 
 - **`scipy.spatial.distance.cdist`**: cálculo vetorizado de distâncias euclidianas par-a-par em $\mathcal{O}(N^2)$.
 - **`scipy.spatial.ConvexHull`**: construção do fecho convexo planar em $\mathcal{O}(N \log N)$.

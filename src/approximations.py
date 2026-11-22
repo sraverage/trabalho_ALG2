@@ -11,10 +11,11 @@ def _build_graph_and_mst(
     dist_matrix: np.ndarray,
     telemetry: dict[str, float],
 ) -> tuple[nx.Graph, nx.Graph]:
-    """Constrói o grafo completo ponderado e extrai a MST via Prim com profiling isolado."""
+    """Monta o grafo completo em NetworkX e extrai a MST via Prim com profiling isolado."""
     n = dist_matrix.shape[0]
     with profile_block(telemetry, "mst"):
         graph = nx.from_numpy_array(dist_matrix)
+        # from_numpy_array trata peso 0 como ausência de aresta; restaura pares coincidentes.
         if graph.number_of_edges() < n * (n - 1) // 2:
             zero_pairs = np.argwhere((dist_matrix == 0) & (~np.eye(n, dtype=bool)))
             graph.add_edges_from(
@@ -28,8 +29,8 @@ def twice_around_the_tree_tsp(
     coords: np.ndarray,
     dist_matrix: np.ndarray,
 ) -> tuple[int, list[int], dict[str, float]]:
-    """Estratégia 4: Algoritmo 2-aproximado Twice-around-the-tree."""
-    _ = coords
+    """Algoritmo 2-aproximado Twice-around-the-tree."""
+    del coords
     telemetry: dict[str, float] = {}
     with profile_block(telemetry, "heuristic_total"):
         _, mst = _build_graph_and_mst(dist_matrix, telemetry)
@@ -43,16 +44,16 @@ def christofides_tsp(
     coords: np.ndarray,
     dist_matrix: np.ndarray,
 ) -> tuple[int, list[int], dict[str, float]]:
-    """Estratégia 5: Algoritmo 1.5-aproximado de Christofides-Serdyukov."""
-    _ = coords
+    """Algoritmo 3/2-aproximado de Christofides-Serdyukov."""
+    del coords
     telemetry: dict[str, float] = {}
     with profile_block(telemetry, "heuristic_total"):
         graph, mst = _build_graph_and_mst(dist_matrix, telemetry)
 
-        odd_nodes = [int(v) for v, deg in mst.degree() if deg % 2 == 1]
+        odd_vertices = [int(v) for v, deg in mst.degree() if deg % 2 == 1]
 
         with profile_block(telemetry, "matching"):
-            odd_subgraph = graph.subgraph(odd_nodes)
+            odd_subgraph = graph.subgraph(odd_vertices)
             matching = nx.algorithms.matching.min_weight_matching(
                 odd_subgraph,
                 weight="weight",
@@ -67,13 +68,13 @@ def christofides_tsp(
             euler_edges = list(nx.eulerian_circuit(multigraph, source=0))
 
         with profile_block(telemetry, "shortcutting"):
-            visited: set[int] = {0}
-            tour: list[int] = [0]
+            visited = {0}
+            tour = [0]
             for _, v in euler_edges:
-                v_int = int(v)
-                if v_int not in visited:
-                    visited.add(v_int)
-                    tour.append(v_int)
+                vertex = int(v)
+                if vertex not in visited:
+                    visited.add(vertex)
+                    tour.append(vertex)
 
         cost = compute_tour_cost(dist_matrix, tour)
     return cost, tour, telemetry

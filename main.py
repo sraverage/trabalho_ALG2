@@ -9,7 +9,7 @@ import numpy as np
 
 from src.analysis import run_full_analysis
 from src.approximations import christofides_tsp, twice_around_the_tree_tsp
-from src.branch_and_bound import BranchAndBoundTSP, benchmark_mst_subroutines
+from src.branch_and_bound import BnBResult, BranchAndBoundTSP, benchmark_mst_subroutines
 from src.features import extract_instance_features
 from src.heuristics import (
     cold_start_tsp,
@@ -84,14 +84,14 @@ def _load_completed_pairs(metrics_csv: Path) -> tuple[set[tuple[str, str]], dict
         return completed, cold_times
 
     with metrics_csv.open("r", encoding="utf-8", newline="") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
+        for row in csv.DictReader(fh):
             inst = row.get("instance", "")
             strat = row.get("strategy", "")
             if inst and strat:
                 completed.add((inst, strat))
                 if strat == "cold_start":
                     cold_times[inst] = float(row.get("bb_total_time", 0.0) or 0.0)
+
     return completed, cold_times
 
 
@@ -100,9 +100,94 @@ def _resolve_time_limit(mode: str, n_vertices: int, custom_limit: float | None) 
         return custom_limit
     if mode == "full":
         return 1800.0
-    if n_vertices <= 29:
-        return 4.5
-    return 0.8
+    return 4.5 if n_vertices <= 29 else 0.8
+
+
+def _export_instance_features(tsp_paths: list[Path], features_csv: Path) -> None:
+    rows: list[dict[str, str | float]] = []
+    for path in tsp_paths:
+        coords = parse_tsplib(path)
+        dist = compute_euc2d_matrix(coords)
+        row: dict[str, str | float] = {"instance": path.stem}
+        row.update(extract_instance_features(coords, dist))
+        rows.append(row)
+
+    with features_csv.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=FEATURES_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _export_mst_benchmark(data_dir: Path, mst_bench_csv: Path) -> None:
+    sample_coords = parse_tsplib(data_dir / "eil20.tsp")
+    sample_dist = compute_euc2d_matrix(sample_coords)
+    bench_stats = benchmark_mst_subroutines(sample_dist, sub_size=20, repetitions=400)
+
+    with mst_bench_csv.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(bench_stats.keys()))
+        writer.writeheader()
+        writer.writerow(bench_stats)
+
+
+def _build_metrics_row(
+    inst_name: str,
+    n_vertices: int,
+    strat_name: str,
+    ref_opt: int,
+    ub_cost: int,
+    h_telemetry: dict[str, float],
+    bb_res: BnBResult,
+    cold_start_bb_times: dict[str, float],
+) -> dict[str, str | int | float]:
+    opt_cost = bb_res["optimal_cost"]
+    effective_opt = int(opt_cost) if opt_cost is not None else ref_opt
+    gap_pct = (
+        100.0 * float(ub_cost - effective_opt) / float(effective_opt)
+        if effective_opt > 0
+        else 0.0
+    )
+
+    h_time = float(h_telemetry.get("heuristic_total_time", 0.0))
+    bb_time = float(bb_res["bb_total_time"])
+    total_time = h_time + bb_time
+
+    if strat_name == "cold_start":
+        cold_start_bb_times[inst_name] = bb_time
+        net_speedup = 1.0
+    else:
+        base_cold = cold_start_bb_times.get(inst_name, total_time)
+        net_speedup = base_cold / max(total_time, 1e-9)
+
+    peak_mem = max(float(h_telemetry.get("peak_memory_kb", 0.0)), float(bb_res["peak_memory_kb"]))
+
+    return {
+        "instance": inst_name,
+        "n_vertices": n_vertices,
+        "strategy": strat_name,
+        "reference_opt": effective_opt,
+        "initial_ub": ub_cost,
+        "optimal_cost": "NA" if bb_res["aborted"] else int(bb_res["best_ub_found_so_far"]),
+        "best_ub_found_so_far": int(bb_res["best_ub_found_so_far"]),
+        "approx_gap_pct": round(gap_pct, 4),
+        "aborted": bool(bb_res["aborted"]),
+        "heuristic_time": round(h_time, 6),
+        "mst_time": round(float(h_telemetry.get("mst_time", 0.0)), 6),
+        "matching_time": round(float(h_telemetry.get("matching_time", 0.0)), 6),
+        "eulerian_time": round(float(h_telemetry.get("eulerian_time", 0.0)), 6),
+        "convex_hull_time": round(float(h_telemetry.get("convex_hull_time", 0.0)), 6),
+        "bb_total_time": round(bb_time, 6),
+        "bb_mst_bound_time": round(float(bb_res["bb_mst_bound_time"]), 6),
+        "total_pipeline_time": round(total_time, 6),
+        "net_speedup": round(net_speedup, 4),
+        "nodes_expanded": int(bb_res["nodes_expanded"]),
+        "nodes_pruned": int(bb_res["nodes_pruned"]),
+        "nodes_pruned_fast": int(bb_res["nodes_pruned_fast"]),
+        "nodes_pruned_geom": int(bb_res["nodes_pruned_geom"]),
+        "nodes_pruned_mst": int(bb_res["nodes_pruned_mst"]),
+        "nodes_pruned_symmetry": int(bb_res["nodes_pruned_symmetry"]),
+        "max_depth_reached": int(bb_res["max_depth_reached"]),
+        "peak_memory_kb": round(peak_mem, 3),
+    }
 
 
 def run_pipeline(
@@ -111,7 +196,7 @@ def run_pipeline(
     custom_time_limit: float | None = None,
     reset: bool = False,
 ) -> dict[str, object]:
-    """Executa o pipeline experimental com checkpointing incremental e análise."""
+    """Executa o pipeline experimental com checkpointing incremental e gera os artefatos de análise."""
     root = Path(base_dir)
     data_dir = root / "data" / "tsplib"
     results_dir = root / "results"
@@ -127,28 +212,8 @@ def run_pipeline(
                 fpath.unlink()
 
     tsp_paths = ensure_tsplib_dataset(data_dir)
-
-    feature_rows: list[dict[str, str | float]] = []
-    for path in tsp_paths:
-        coords = parse_tsplib(path)
-        dist = compute_euc2d_matrix(coords)
-        feats = extract_instance_features(coords, dist)
-        row_f: dict[str, str | float] = {"instance": path.stem}
-        row_f.update(feats)
-        feature_rows.append(row_f)
-
-    with features_csv.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=FEATURES_COLUMNS)
-        writer.writeheader()
-        writer.writerows(feature_rows)
-
-    sample_coords = parse_tsplib(data_dir / "eil20.tsp")
-    sample_dist = compute_euc2d_matrix(sample_coords)
-    bench_stats = benchmark_mst_subroutines(sample_dist, sub_size=20, repetitions=400)
-    with mst_bench_csv.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(bench_stats.keys()))
-        writer.writeheader()
-        writer.writerow(bench_stats)
+    _export_instance_features(tsp_paths, features_csv)
+    _export_mst_benchmark(data_dir, mst_bench_csv)
 
     completed_pairs, cold_start_bb_times = _load_completed_pairs(metrics_csv)
     write_header = not metrics_csv.is_file() or metrics_csv.stat().st_size == 0
@@ -175,58 +240,16 @@ def run_pipeline(
                 solver = BranchAndBoundTSP(coords, dist, time_limit=t_limit)
                 bb_res = solver.solve(initial_ub=ub_cost, initial_tour=ub_tour)
 
-                opt_cost = bb_res["optimal_cost"]
-                effective_opt = int(opt_cost) if opt_cost is not None else ref_opt
-                gap_pct = (
-                    100.0 * float(ub_cost - effective_opt) / float(effective_opt)
-                    if effective_opt > 0
-                    else 0.0
+                row_m = _build_metrics_row(
+                    inst_name=inst_name,
+                    n_vertices=n,
+                    strat_name=strat_name,
+                    ref_opt=ref_opt,
+                    ub_cost=ub_cost,
+                    h_telemetry=h_telemetry,
+                    bb_res=bb_res,
+                    cold_start_bb_times=cold_start_bb_times,
                 )
-
-                h_time = float(h_telemetry.get("heuristic_total_time", 0.0))
-                bb_time = float(bb_res["bb_total_time"])
-                total_time = h_time + bb_time
-
-                if strat_name == "cold_start":
-                    cold_start_bb_times[inst_name] = bb_time
-                    net_speedup = 1.0
-                else:
-                    base_cold = cold_start_bb_times.get(inst_name, total_time)
-                    net_speedup = base_cold / max(total_time, 1e-9)
-
-                peak_mem = max(
-                    float(h_telemetry.get("peak_memory_kb", 0.0)),
-                    float(bb_res["peak_memory_kb"]),
-                )
-
-                row_m: dict[str, str | int | float] = {
-                    "instance": inst_name,
-                    "n_vertices": n,
-                    "strategy": strat_name,
-                    "reference_opt": effective_opt,
-                    "initial_ub": ub_cost,
-                    "optimal_cost": "NA" if bb_res["aborted"] else int(bb_res["best_ub_found_so_far"]),
-                    "best_ub_found_so_far": int(bb_res["best_ub_found_so_far"]),
-                    "approx_gap_pct": round(gap_pct, 4),
-                    "aborted": bool(bb_res["aborted"]),
-                    "heuristic_time": round(h_time, 6),
-                    "mst_time": round(float(h_telemetry.get("mst_time", 0.0)), 6),
-                    "matching_time": round(float(h_telemetry.get("matching_time", 0.0)), 6),
-                    "eulerian_time": round(float(h_telemetry.get("eulerian_time", 0.0)), 6),
-                    "convex_hull_time": round(float(h_telemetry.get("convex_hull_time", 0.0)), 6),
-                    "bb_total_time": round(bb_time, 6),
-                    "bb_mst_bound_time": round(float(bb_res["bb_mst_bound_time"]), 6),
-                    "total_pipeline_time": round(total_time, 6),
-                    "net_speedup": round(net_speedup, 4),
-                    "nodes_expanded": int(bb_res["nodes_expanded"]),
-                    "nodes_pruned": int(bb_res["nodes_pruned"]),
-                    "nodes_pruned_fast": int(bb_res["nodes_pruned_fast"]),
-                    "nodes_pruned_geom": int(bb_res["nodes_pruned_geom"]),
-                    "nodes_pruned_mst": int(bb_res["nodes_pruned_mst"]),
-                    "nodes_pruned_symmetry": int(bb_res["nodes_pruned_symmetry"]),
-                    "max_depth_reached": int(bb_res["max_depth_reached"]),
-                    "peak_memory_kb": round(peak_mem, 3),
-                }
                 writer.writerow(row_m)
                 fh.flush()
                 completed_pairs.add((inst_name, strat_name))

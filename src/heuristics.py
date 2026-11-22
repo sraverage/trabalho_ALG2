@@ -11,12 +11,11 @@ def cold_start_tsp(
     coords: np.ndarray,
     dist_matrix: np.ndarray,
 ) -> tuple[int, list[int], dict[str, float]]:
-    """Estratégia 1: Inicialização trivial na ordem natural dos índices [0, 1, ..., N-1]."""
-    _ = coords
+    """Inicialização trivial seguindo a ordem natural dos vértices [0, 1, ..., N-1]."""
+    del coords
     telemetry: dict[str, float] = {}
     with profile_block(telemetry, "heuristic_total"):
-        n = dist_matrix.shape[0]
-        tour = list(range(n))
+        tour = list(range(dist_matrix.shape[0]))
         cost = compute_tour_cost(dist_matrix, tour)
     return cost, tour, telemetry
 
@@ -25,23 +24,23 @@ def nearest_neighbor_tsp(
     coords: np.ndarray,
     dist_matrix: np.ndarray,
 ) -> tuple[int, list[int], dict[str, float]]:
-    """Estratégia 2: Heurística construtiva gulosa do Vizinho Mais Próximo."""
-    _ = coords
+    """Heurística gulosa do Vizinho Mais Próximo a partir do vértice 0."""
+    del coords
     telemetry: dict[str, float] = {}
     with profile_block(telemetry, "heuristic_total"):
         n = dist_matrix.shape[0]
         visited = np.zeros(n, dtype=bool)
         visited[0] = True
         tour = [0]
-        curr = 0
-        inf_sentinel = int(np.max(dist_matrix)) + 1
+        current = 0
+        sentinel = int(np.max(dist_matrix)) + 1
 
         for _ in range(n - 1):
-            row = np.where(visited, inf_sentinel, dist_matrix[curr])
-            nxt = int(np.argmin(row))
+            candidates = np.where(visited, sentinel, dist_matrix[current])
+            nxt = int(np.argmin(candidates))
             visited[nxt] = True
             tour.append(nxt)
-            curr = nxt
+            current = nxt
 
         cost = compute_tour_cost(dist_matrix, tour)
     return cost, tour, telemetry
@@ -51,13 +50,13 @@ def convex_hull_insertion_tsp(
     coords: np.ndarray,
     dist_matrix: np.ndarray,
 ) -> tuple[int, list[int], dict[str, float]]:
-    """Estratégia 3: Sub-rota inicial pelo Fecho Convexo e inserção gulosa vetorizada."""
+    """Constrói o ciclo inicial pelo fecho convexo e insere os demais vértices gulosamente."""
     telemetry: dict[str, float] = {}
     with profile_block(telemetry, "heuristic_total"):
         n = dist_matrix.shape[0]
         with profile_block(telemetry, "convex_hull"):
             hull = ConvexHull(coords)
-            subtour: list[int] = [int(v) for v in hull.vertices]
+            subtour = [int(v) for v in hull.vertices]
 
         in_subtour = np.zeros(n, dtype=bool)
         in_subtour[subtour] = True
@@ -69,20 +68,21 @@ def convex_hull_insertion_tsp(
                 v_arr = np.roll(u_arr, -1)
                 free_arr = np.asarray(free_nodes, dtype=np.int64)
 
-                delta = (
+                # Avalia d(u, k) + d(k, v) - d(u, v) de forma matricial para todas as arestas e nós livres.
+                insertion_cost = (
                     dist_matrix[np.ix_(u_arr, free_arr)]
                     + dist_matrix[np.ix_(v_arr, free_arr)]
                     - dist_matrix[u_arr, v_arr][:, None]
                 )
-                flat_best = int(np.argmin(delta))
-                edge_pos, free_pos = divmod(flat_best, len(free_arr))
-                chosen_node = int(free_arr[free_pos])
+                best_flat = int(np.argmin(insertion_cost))
+                edge_pos, free_pos = divmod(best_flat, len(free_arr))
+                chosen = int(free_arr[free_pos])
 
-                subtour.insert(edge_pos + 1, chosen_node)
+                subtour.insert(edge_pos + 1, chosen)
                 free_nodes.pop(free_pos)
 
-        zero_idx = subtour.index(0)
-        tour = subtour[zero_idx:] + subtour[:zero_idx]
+        zero_pos = subtour.index(0)
+        tour = subtour[zero_pos:] + subtour[:zero_pos]
         cost = compute_tour_cost(dist_matrix, tour)
 
     return cost, tour, telemetry
