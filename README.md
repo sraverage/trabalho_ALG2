@@ -19,9 +19,6 @@ Este repositório contém a implementação completa, instrumentada e auditada d
 trabalho_22/
 ├── main.py                         # Orquestrador CLI com checkpointing incremental e timeout (1800s no modo full)
 ├── requirements.txt                # Dependências declaradas (numpy, scipy, networkx, scikit-learn, pandas, matplotlib)
-├── enunciado_trabalho.pdf          # Enunciado oficial do TP2 (DCC207)
-├── TECHNICAL-SPEC.md               # Especificação técnica de contratos, invariantes e complexidade
-├── PLAN.md                         # Plano atômico de execução e testes
 ├── README.md                       # Documentação técnica detalhada do funcionamento e resultados
 ├── data/
 │   └── tsplib/                     # 16 instâncias TSPLIB padronizadas na métrica EUC_2D (N entre 10 e 70)
@@ -49,9 +46,8 @@ trabalho_22/
 │   ├── references.bib              # Referências bibliográficas BibTeX
 │   ├── sbc-template.sty            # Estilo oficial SBC
 │   └── sbc.bst                     # Estilo bibliográfico SBC
-├── tests/
-│   └── test_tsp_pipeline.py        # Suíte de 9 testes unitários e de integração end-to-end (isolados em TempDir)
-└── tp2_tsp/                        # Diretório compatível com symlinks para data/, src/, results/, main.py e requirements.txt
+└── tests/
+    └── test_tsp_pipeline.py        # Suíte de 9 testes unitários e de integração end-to-end (isolados em TempDir)
 ```
 
 ---
